@@ -1,0 +1,21 @@
+# Ignore OSX Files
+.DS_Store
+#
+# I use .ts for timestamps for makefile purposes
+*.ts
+#
+# Extra files from latex
+*.bbl
+*.blg
+*.pdf
+*.toc
+*.dvi
+*.aux
+*.log
+*.synctex.gz
+
+*.idx
+*.ilg
+*.ind
+# Hyperref File
+*.out
