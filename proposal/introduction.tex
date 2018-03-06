@@ -1,6 +1,6 @@
 \section{Introduction}
 \paragraph{}
-Our project will be based on the paper \cite{Friesen}, in which a mixed convex-combinatorial approach for training hard-threshold networks is proposed. A hard-threshold activation function $f(x)$ takes value $1$ for $x > 0$ and $-1$ otherwise. Such a function is non-differentiable and cannot be trained using the usual method of gradient descent with backprogation used for soft-threshold networks.
+Our project will be based on the paper \cite{Friesen}, in which a mixed convex-combinatorial approach for training hard-threshold networks is proposed. A hard-threshold activation function $f(x)$ takes value $1$ for $x > 0$ and $-1$ otherwise. Such a function has derivative 0 almost everywhere and, as such, cannot be trained using the usual method of gradient descent with backpropagation used for soft-threshold networks.
 
 The authors show how training a hard-threshold network reduces to finding a set of targets (+1,-1) for each unit of the network, which needs to be ``feasible'', that is, needs to satisfy a set of inequalities based on the dataset one wishes to classify. And for a set of feasible targets, a set of weights minimizing a loss function should be found.
 
