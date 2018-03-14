@@ -1,0 +1,51 @@
+\documentclass[12pt,letterpaper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amsfonts, amssymb, amsthm}
+\usepackage[top=1in, bottom=1in, left=1in, right=1in]{geometry}
+\usepackage{mathdots}
+\usepackage{titlesec}
+\usepackage[backend=bibtex]{biblatex}
+\usepackage{hyperref, mathrsfs}
+\usepackage[]{footmisc}
+\usepackage{graphicx, color}
+\usepackage{verbatim, textcomp}
+\usepackage{algorithm, algorithmic}
+\titleformat{\section}{\normalsize\scshape\center}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\scshape\center}{\thesubsection}{1em}{}
+\makeatletter
+\renewcommand\@makefntext[1]{%
+    \parindent 1em%
+    \@thefnmark.~#1}
+\makeatother
+
+\makeatletter
+\def\moverlay{\mathpalette\mov@rlay}
+\def\mov@rlay#1#2{\leavevmode\vtop{%
+   \baselineskip\z@skip \lineskiplimit-\maxdimen
+   \ialign{\hfil$\m@th#1##$\hfil\cr#2\crcr}}}
+\newcommand{\charfusion}[3][\mathord]{
+    #1{\ifx#1\mathop\vphantom{#2}\fi
+        \mathpalette\mov@rlay{#2\cr#3}
+      }
+    \ifx#1\mathop\expandafter\displaylimits\fi}
+\makeatother
+
+\begin{document}
+\title{\uppercase{\textbf{\normalsize Target Heuristics}}}
+\author{\small{\textsc{}}}
+\date{\small{\textsc{\today}}}
+\maketitle
+
+\allowdisplaybreaks
+
+For a $d$-layer deep neural network with hard-threshold units, let $h_{dj} \in \{-1, 1\}$ be the $j$th output activation in the $d$th hidden layer, let $z_{dj}$ be the pre-activation output, and $t_{dj}$ be the target used during training via target propagation. Furthermore, write $T_{d} = \{t_{d1}, \ldots, t_{dk}\}$ and $Z_{d} = \{z_{d1}, \ldots, z_{dk}\}$, where $k$ is the number of units in each hidden layer. 
+
+The ``fast gradient sign method" for generating adversarial examples computes a max-norm constrained perturbation $\mathbf{\eta}$ for ``optimally" fooling the network given by
+$$\mathbf{\eta} = \epsilon \textrm{sign}(\Delta_{x}L(\theta, \mathbf{x}, y)),$$ 
+where $\mathbf{x}$ is an vector input to the network, $y$ is an output target associated to $\mathbf{x}$, $L$ is a loss function used to train the network, and $\epsilon$ is a small perturbation constant---the adversarial input is then $\tilde{\mathbf{x}} = \mathbf{x} + \mathbf{\eta}$. If we instead use $-\mathbf{\eta}$ to perturb $\mathbf{x}$, then we obtain an input $\tilde{\mathbf{x}}$ that ``optimally" achieves the desired target $y$ when processed by the network. But this is essentially exactly what we need to set the target $t_{dj}$ for target propagation; in particular, for the loss function $L_{d+1}$ dependent on $Z_{d}$ and $T_{d}$ associated to layer $d$ of our network setting
+$$t_{dj} = \textrm{sign}\left(-{\partial \over \partial h_{dj}}L_{d+1}(Z_{d+1}, T_{d+1})\right)$$
+gives an effective setting of the targets for training the network via target propagation using a method analogous to applying FGSM to create an adversarial example for the perceptron at layer $d$---note that this is exactly the same target heuristic from the Friesen et al. paper. 
+
+If we apply a gradient estimator (like the straight-through estimator), we could instead replace $L_{d+1}$ with the output loss $L$ and use backpropagation in combination with target propagation to train the network. Furthermore, we could also draw on additional methods from the adversarial examples and nonconvex optimization literature in order to improve the target setting heuristic; for example, adding the superscript $t$ for to denote the value of a variable at time step $t$, we can apply momentum to target setting in something like the following way:
+$$t_{dj}^{t+1} = \textrm{sign}\left(\mu t_{dj}^{t} - {{\partial \over \partial h_{dj}}L_{d+1}(Z_{d+1}, T_{d+1}) \over \Vert \nabla_{h_{d}}L_{d+1}(Z_{d+1}, T_{d+1}) \Vert}\right).$$
+\end{document} 
