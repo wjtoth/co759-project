@@ -1,6 +1,7 @@
 
-from torch import nn
+import numpy as np
 import foolbox
+from torch import nn
 
 
 ATTACKS = {
@@ -37,8 +38,35 @@ def generate_adversarial_examples(model, attack, dataset, criterion,
             criterion = criterion(target_class)
 
     attack = attack(model=model, criterion=criterion)
-    return [attack(image, label) for image, label in dataset]
+    return [attack(image, label), label for image, label in dataset]
 
 
-def adversarial_eval(model, adversarial_dataset):
-    pass
+def adversarial_eval(model, adversarial_dataset, criterion="untargeted_misclassify", 
+                     batch_size=64, target_class=None):
+    failures = []
+    for i in range(len(adversarial_dataset) // batch_size):
+        examples = adversarial_dataset[i*batch_size:(i+1)*batch_size]
+        images = [example[0] for example in examples]
+        labels = [example[1] for example in examples]
+        if images[0].ndim == 4:
+            images = np.concat(images)
+        elif images[0].ndim == 3:
+            images = np.concat([image[None,:] for image in images])
+        else:
+            raise ValueError("Can't handle an adversarial example of that shape!")
+        logits = model.batch_predictions(images)
+        predictions = np.argmax(logits, axis=1)
+        if criterion == "untargeted_misclassify":
+            successes.extend(
+                [predictions[j] != labels[j] for j in range(batch_size)])
+        elif criterion == "untargeted_top5_misclassify":
+            predictions = np.argpartition(logits, -5)[-5:]
+            successes.extend(
+                [labels[j] not in predictions[j] for j in range(batch_size)])
+        elif criterion == "targeted_correct_class":
+            successes.extend(
+                [predictions[j] == target_class for j in range(batch_size)])
+        else:
+            raise ValueError("Unsupported criterion!")
+
+    return failures / (batch_size * (len(adversarial_dataset)//batch_size))
