@@ -19,3 +19,9 @@
 *.ind
 # Hyperref File
 *.out
+
+*.pyc
+code/data/
+code/logs/
+code/models/
+code/util/
