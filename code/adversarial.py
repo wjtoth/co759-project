@@ -38,7 +38,7 @@ def generate_adversarial_examples(model, attack, dataset, criterion,
             criterion = criterion(target_class)
 
     attack = attack(model=model, criterion=criterion)
-    return [attack(image, label), label for image, label in dataset]
+    return [(attack(image, label), label) for image, label in dataset]
 
 
 def adversarial_eval(model, adversarial_dataset, criterion="untargeted_misclassify", 
