@@ -75,7 +75,7 @@ The target propagation training algorithm looks something like the following:
 \end{algorithmic}
 \end{algorithm} 
 
-We may consider augmenting this method by e.g. choosing some candidate targets from past time steps with training examples of the same output target, a kind of target ``momentum". Note that this example augmentation would primarily make sense for targets in layers close to the output, since earlier layers tend to process detailed features that could deviate too greatly between inputs with the same output target (although this only holds to some extent). 
+We may consider augmenting this method in various ways. For example, it may be beneficial to choose some candidate targets from past time steps with training examples of the same output target, a kind of target ``momentum". Note that this example augmentation would primarily make sense for targets in layers close to the output, since earlier layers tend to process detailed features that could deviate too greatly between inputs with the same output target (although this is only a problem to some extent). Furthermore, we might also choose some candidate targets derived from a gradient-based method as described above, allowing for a mixed continuous-combinatorial target setting approach that achieves the benefits of both while adding only a small overhead from computing the gradients.
 
 
 \end{document} 
