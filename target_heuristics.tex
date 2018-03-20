@@ -67,13 +67,15 @@ The target propagation training algorithm looks something like the following:
 \FOR{each layer, starting at the last layer}
 \FOR{each candidate target in the population}
 \STATE{Run a forward pass and a step of gradient descent on the perceptron associated to this layer based on $L(h, t)$, where $L$ is the loss function for the perceptron, $h$ is the hidden state, and $t$ is the candidate target}
-\STATE{Run a forward pass through this layer and the next layer and calculate $L_{\textrm{next}}$, the next layer's loss.}
+\STATE{Run a forward pass through this layer and the next layer and calculate $L_{\textrm{next}}$, the next layer's loss (bootstrapping).}
 \ENDFOR
 \STATE{Choose targets and weights based on the losses.}
 \ENDFOR
 \ENDFOR
 \end{algorithmic}
 \end{algorithm} 
+
+We may consider augmenting this method in various ways. For example, it may be beneficial to choose some candidate targets from past time steps with training examples of the same output target, a kind of target ``momentum". Note that this example augmentation would primarily make sense for targets in layers close to the output, since earlier layers tend to process detailed features that could deviate too greatly between inputs with the same output target (although this is only a problem to some extent). Furthermore, we might also choose some candidate targets derived from a gradient-based method as described above, allowing for a mixed continuous-combinatorial target setting approach that achieves the benefits of both while adding only a small overhead from computing the gradients.
 
 
 \end{document} 
