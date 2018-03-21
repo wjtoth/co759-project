@@ -1,18 +1,9 @@
-
-#import adversarial
-
-#python
+# python
 import argparse
 import numpy as np
 from util.reshapemodule import ReshapeBatch
 
-#friesen and Domingos
-import losses
-from datasets import create_datasets
-from collections import OrderedDict
-import targetprop as tp
-
-#pytorch
+# pytorch
 import torch
 import torch.nn as nn
 from torch.autograd import Function, Variable
@@ -21,6 +12,15 @@ import torch.optim as optim
 import torchvision
 import torchvision.models as models
 import torchvision.transforms as transforms
+
+# friesen and Domingos
+import losses
+from datasets import create_datasets
+from collections import OrderedDict
+import targetprop as tp
+
+# ours
+import adversarial
 
 
 def main():
@@ -34,18 +34,21 @@ def main():
     parser.add_argument('--test-batch', type=int, default=0,
                         help='batch size to use for validation and testing')
     parser.add_argument('--data-root', type=str, default='',
-                        help='root directory for imagenet dataset (with separate train, val, test folders)')     
+                        help='root directory for imagenet dataset '
+                             '(with separate train, val, test folders)')     
     parser.add_argument('--no-aug', action='store_true',
-                        help='if specified, do not use data augmentation (default=True for MNIST, False for CIFAR10)')
+                        help='if specified, do not use data augmentation ' 
+                             '(default=True for MNIST, False for CIFAR10)')
     parser.add_argument('--download', action='store_true',
-                        help='allow downloading of the dataset (not including imagenet) if not found')
+                        help='allow downloading of the dataset ' 
+                             '(not including imagenet) if not found')
     parser.add_argument('--dbg-ds-size', type=int, default=0,
                         help='debug: artificially limit the size of the training data')
     parser.add_argument('--nworkers', type=int, default=2,
                         help='number of workers to use for loading data from disk')
     parser.add_argument('--no-val', action='store_true', default=False,
-                        help='if specified, do not create a validation set from the training data and '
-                             'use it to choose the best model')
+                        help='if specified, do not create a validation set '
+                             'from the training data and use it to choose the best model')
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='if specified, use CPU only')
     parser.add_argument('--seed', type=int, default=468412397,
@@ -56,10 +59,9 @@ def main():
     args.cuda = args.cuda and torch.cuda.is_available()
     
     train_loader, val_loader, test_loader, num_classes = \
-        create_datasets('cifar10', args.batch, args.test_batch, not args.no_aug, args.no_val, args.data_root,
-                        args.cuda, args.seed, args.nworkers, args.dbg_ds_size, args.download)
-            #(args.ds, args.batch, args.test_batch, not args.no_aug, args.no_val, args.data_root, 
-            #            args.cuda, args.seed, args.nworkers, args.dbg_ds_size, args.download)
+        create_datasets('cifar10', args.batch, args.test_batch, not args.no_aug, 
+                        args.no_val, args.data_root, args.cuda, args.seed, 
+                        args.nworkers, args.dbg_ds_size, args.download)
 
     print("Creating Network...")
     net = ConvNet4()
@@ -76,7 +78,7 @@ def main():
         
         for i, (inputs, labels, index) in enumerate(train_loader):
             
-            #Friesen named labels as targets, changed to avoid confusion (Daniel)
+            # Friesen named labels as targets, changed to avoid confusion (Daniel)
             # wrap them in Variable
             inputs, labels = Variable(inputs), Variable(labels)
             if args.cuda:
@@ -109,13 +111,15 @@ class ConvNet4(nn.Module):
         self.fc2_size = 10  # 1024 #200 #500 #1024
 
         block1 = OrderedDict([
-            ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, kernel_size=5, padding=3)),
+            ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, 
+                                kernel_size=5, padding=3)),
             ('maxpool1', nn.MaxPool2d(2)),
             ('nonlin1', nonlin())
         ])
 
         block2 = OrderedDict([
-            ('conv2', nn.Conv2d(self.conv1_size, self.conv2_size, kernel_size=5, padding=2)),
+            ('conv2', nn.Conv2d(self.conv1_size, self.conv2_size, 
+                                kernel_size=5, padding=2)),
             ('maxpool2', nn.MaxPool2d(2)),
             ('nonlin2', nonlin()),
         ])
@@ -123,7 +127,8 @@ class ConvNet4(nn.Module):
         block3 = OrderedDict([
             ('batchnorm1', nn.BatchNorm2d(self.conv2_size)),
             ('reshape1', ReshapeBatch(-1)),
-            ('fc1', nn.Linear((input_shape[1] // 4) * (input_shape[2] // 4) * self.conv2_size, self.fc1_size)),
+            ('fc1', nn.Linear((input_shape[1] // 4) * (input_shape[2] // 4) 
+                              * self.conv2_size, self.fc1_size)),
             ('nonlin3', nonlin()),
         ])
 
@@ -153,7 +158,8 @@ class StepF(Function):
     update upstream weights in the network.
     """
 
-    def __init__(self, targetprop_rule=tp.TPRule.WtHinge, make01=False, scale_by_grad_out=False):
+    def __init__(self, targetprop_rule=tp.TPRule.WtHinge, 
+                 make01=False, scale_by_grad_out=False):
         super(StepF, self).__init__()
         self.tp_rule = targetprop_rule
         # self.tp_grad_func = tp.TPRule.get_backward_func(self.tp_rule)
@@ -161,13 +167,15 @@ class StepF(Function):
         self.scale_by_grad_out = scale_by_grad_out
         self.target = None
         self.saved_grad_out = None
-        assert not (self.tp_rule == tp.TPRule.SSTE and self.scale_by_grad_out), 'scale_by_grad and SSTE are incompatible'
-        assert not (self.tp_rule == tp.TPRule.STE and self.scale_by_grad_out), 'scale_by_grad and STE are incompatible'
-        assert not (self.tp_rule == tp.TPRule.Ramp and self.scale_by_grad_out), 'scale_by_grad and Ramp are incompatible'
+        assert (not (self.tp_rule == tp.TPRule.SSTE and self.scale_by_grad_out), 
+                'scale_by_grad and SSTE are incompatible')
+        assert (not (self.tp_rule == tp.TPRule.STE and self.scale_by_grad_out), 
+                'scale_by_grad and STE are incompatible')
+        assert (not (self.tp_rule == tp.TPRule.Ramp and self.scale_by_grad_out), 
+                'scale_by_grad and Ramp are incompatible')
 
     def forward(self, input_):
         self.save_for_backward(input_)
-        # output = torch.sign(input_)  # output \in {-1, 0, +1}
         output = tp.sign11(input_)  # output \in {-1, +1}
         if self.make01:
             output.clamp_(min=0)  # output \in {0, 1}
@@ -177,17 +185,20 @@ class StepF(Function):
         input_, = self.saved_tensors
         grad_input = None
         if self.needs_input_grad[0]:
-            # compute targets = neg. sign of output grad, where t \in {-1, 0, 1} (t=0 means ignore this unit)
+            # compute targets = neg. sign of output grad, 
+            # where t \in {-1, 0, 1} (t=0 means ignore this unit)
             go = grad_output if self.saved_grad_out is None else self.saved_grad_out
             tp_grad_func = tp.TPRule.get_backward_func(self.tp_rule)
             grad_input, self.target = tp_grad_func(input_, go, self.target, self.make01)
             if self.scale_by_grad_out:
-                grad_input = grad_input * go.size()[0] * go.abs()  # remove batch-size scaling
+                # remove batch-size scaling
+                grad_input = grad_input * go.size()[0] * go.abs()  
         return grad_input
 
 
 class Step(nn.Module):
-    def __init__(self, targetprop_rule=tp.TPRule.TruncWtHinge, make01=False, scale_by_grad_out=False):
+    def __init__(self, targetprop_rule=tp.TPRule.TruncWtHinge, 
+                 make01=False, scale_by_grad_out=False):
         super(Step, self).__init__()
         self.tp_rule = targetprop_rule
         self.make01 = make01
@@ -203,11 +214,14 @@ class Step(nn.Module):
         self.output_hook = output_hook
 
     def forward(self, x):
-        y = StepF(targetprop_rule=self.tp_rule, make01=self.make01, scale_by_grad_out=self.scale_by_grad_out)(x)
+        y = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
+                  scale_by_grad_out=self.scale_by_grad_out)(x)
         if self.output_hook:
-            # detach the output from the input to the next layer, so we can perform target propagation
+            # detach the output from the input to the next layer, 
+            # so we can perform target propagation
             z = Variable(y.data.clone(), requires_grad=True)
-            # assert self.output_hook, "output hook must exist, otherwise output vars will be lost"
+            # assert self.output_hook, "output hook must exist, 
+            # otherwise output vars will be lost"
             self.output_hook(x, y, z)
             return z
         else:
