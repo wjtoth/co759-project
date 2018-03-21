@@ -1,7 +1,10 @@
 # python
+import sys
 import argparse
 import numpy as np
 from util.reshapemodule import ReshapeBatch
+from random import choice
+from functools import partial
 
 # pytorch
 import torch
@@ -74,13 +77,29 @@ def main():
                                     for image, label in adv_eval_loader]
 
     print("Creating Network...")
-    net = ConvNet4()
+    
+    #cifar
+    input_shape=(3, 32, 32)
+    
+    #define nonlinear function to be used
+    nonlin = Step
+    
+    net1 = ConvNet4_1(nonlin=nonlin,input_shape=input_shape)
+    net2 = ConvNet4_2(nonlin=nonlin,input_shape=input_shape)
+    net3 = ConvNet4_3(nonlin=nonlin,input_shape=input_shape)
+    net4 = ConvNet4_4(nonlin=nonlin,input_shape=input_shape)
     if args.cuda:
-        net = net.cuda()
+        net1 = net1.cuda()
+        net2 = net2.cuda()
+        net3 = net3.cuda()
+        net4 = net4.cuda()
     print("Network Created")
     
     criterion = losses.multiclass_hinge_loss
-    optimizer = optim.Adam(net.parameters(), lr=0.001)
+    optimizer1 = optim.Adam(net1.parameters())
+    optimizer2 = optim.Adam(net2.parameters())
+    optimizer3 = optim.Adam(net3.parameters())
+    optimizer4 = optim.Adam(net4.parameters())
     
     for epoch in range(args.epochs):  # loop over the dataset multiple times
         
@@ -95,17 +114,58 @@ def main():
                 inputs, labels = inputs.cuda(), labels.cuda()
     
             # zero the parameter gradients
-            optimizer.zero_grad()
+            optimizer1.zero_grad()
+            optimizer2.zero_grad()
+            optimizer3.zero_grad()
     
-            # forward + backward + optimize
-            outputs = net(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            # forward and initialize the targets
+            targets12 = net1(inputs)
+            targets23 = net2(targets12)
+            targets34 = net3(targets23)
+            
+            #backward
+            #optimize weights from layer 4
+            bestloss = 0
+            for j in range(10):
+                optimizer4.zero_grad()
+                outputs = net4(targets34)
+                loss4 = criterion(outputs, labels)
+                loss4.backward(retain_graph=True)
+                loss = loss4.data[0]
+                print('Epoch: %d, Batch: %5d, Loss: %.3f'%(epoch + 1, i + 1, loss))
+                optimizer4.step()
+                bestloss = loss
+                
+            #play with target setting
+            target_copy = targets34.clone()
+            for j in range(10):
+                for k in range(10):
+                    print(target_copy[j][k])
+                    target_copy[j][k] = target_copy[j][k].neg()           
+                    print(target_copy[j][k])
+                    sys.exit()
+                    outputs = net4(target_copy)
+                    loss4 = criterion(outputs, labels)
+                    loss = loss4.data[0]
+                    print('Epoch: %d, Batch: %5d, Loss: %.3f'%(epoch + 1, i + 1, loss))
+                    #check movement
+                    if loss < bestloss:
+                        #update best solution
+                        bestloss = loss 
+                    else:
+                        #revert changes
+                        target_copy[j][k].neg()
+                                
+            sys.exit
+            
+            #optimize
+            optimizer1.step()
+            optimizer2.step()
+            optimizer3.step()
     
             # print statistics
             if i % 50 == 0:    # print every 50 mini-batches
-                loss = loss.data[0]
+                loss = loss4.data[0]
                 print('Epoch: %d, Batch: %5d, Loss: %.3f'%(epoch + 1, i + 1, loss))
 
     print('Finished training')
@@ -129,7 +189,14 @@ class ConvNet4(nn.Module):
         self.conv2_size = 64  # 128 #64
         self.fc1_size = 1024  # 200 #500 #1024
         self.fc2_size = 10  # 1024 #200 #500 #1024
-
+        
+        #initialize the set of targets for the mid layers
+        self.targets = [
+                [choice([-1,1]) for i in range(self.conv1_size)],
+                [choice([-1,1]) for i in range(self.conv2_size)],
+                [choice([-1,1]) for i in range(self.fc1_size)]
+                ]  # 1024 #200 #500 #1024
+        
         block1 = OrderedDict([
             ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, 
                                 kernel_size=5, padding=3)),
@@ -172,12 +239,110 @@ class ConvNet4(nn.Module):
         x = self.all_modules(x)
         return x
 
+
+class ConvNet4_1(nn.Module):
+    def __init__(self, nonlin=nn.ReLU, use_bn=False, input_shape=(3, 32, 32)):
+        super(ConvNet4_1, self).__init__()
+        # self.nonlin = nonlin
+        self.conv1_size = 32  # 64 #32
+        
+        block1 = OrderedDict([
+            ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, 
+                                kernel_size=5, padding=3)),
+            ('maxpool1', nn.MaxPool2d(2)),
+            ('nonlin1', nonlin())
+        ])
+
+        self.all_modules = nn.Sequential(OrderedDict([
+            ('block1', nn.Sequential(block1))
+        ]))
+
+    def forward(self, x):
+        x = self.all_modules(x)
+        return x
+
+
+class ConvNet4_2(nn.Module):
+    def __init__(self, nonlin=nn.ReLU, use_bn=False, input_shape=(3, 32, 32)):
+        super(ConvNet4_2, self).__init__()
+        # self.nonlin = nonlin
+        self.conv1_size = 32  # 64 #32
+        self.conv2_size = 64  # 128 #64
+
+        block2 = OrderedDict([
+            ('conv2', nn.Conv2d(self.conv1_size, self.conv2_size, 
+                                kernel_size=5, padding=2)),
+            ('maxpool2', nn.MaxPool2d(2)),
+            ('nonlin2', nonlin()),
+        ])
+
+
+        self.all_modules = nn.Sequential(OrderedDict([
+            ('block2', nn.Sequential(block2))
+        ]))
+
+    def forward(self, x):
+        x = self.all_modules(x)
+        return x
+
+
+class ConvNet4_3(nn.Module):
+    def __init__(self, nonlin=nn.ReLU, use_bn=False, input_shape=(3, 32, 32)):
+        super(ConvNet4_3, self).__init__()
+        # self.nonlin = nonlin
+        self.use_bn = use_bn
+        self.conv2_size = 64  # 128 #64
+        self.fc1_size = 1024  # 200 #500 #1024
+        
+        block3 = OrderedDict([
+            ('batchnorm1', nn.BatchNorm2d(self.conv2_size)),
+            ('reshape1', ReshapeBatch(-1)),
+            ('fc1', nn.Linear((input_shape[1] // 4) * (input_shape[2] // 4) 
+                              * self.conv2_size, self.fc1_size)),
+            ('nonlin3', nonlin()),
+        ])
+
+        if not self.use_bn:
+            del block3['batchnorm1']
+
+        self.all_modules = nn.Sequential(OrderedDict([
+            ('block3', nn.Sequential(block3))
+        ]))
+
+    def forward(self, x):
+        x = self.all_modules(x)
+        return x
+
+
+class ConvNet4_4(nn.Module):
+    def __init__(self, nonlin=nn.ReLU, use_bn=False, input_shape=(3, 32, 32)):
+        super(ConvNet4_4, self).__init__()
+        # self.nonlin = nonlin
+        self.use_bn = use_bn
+        self.fc1_size = 1024  # 200 #500 #1024
+        self.fc2_size = 10  # 1024 #200 #500 #1024
+        
+        block4 = OrderedDict([
+            ('batchnorm2', nn.BatchNorm1d(self.fc1_size)),
+            ('fc2', nn.Linear(self.fc1_size, self.fc2_size))
+        ])
+
+        if not self.use_bn:
+            del block4['batchnorm2']
+
+        self.all_modules = nn.Sequential(OrderedDict([
+            ('block4', nn.Sequential(block4))
+        ]))
+
+    def forward(self, x):
+        x = self.all_modules(x)
+        return x
+
 class StepF(Function):
     """
     A step function that returns values in {-1, 1} and uses targetprop to
     update upstream weights in the network.
     """
-
     def __init__(self, targetprop_rule=tp.TPRule.WtHinge, 
                  make01=False, scale_by_grad_out=False):
         super(StepF, self).__init__()
@@ -246,8 +411,6 @@ class Step(nn.Module):
             return z
         else:
             return y
-    
-#class BeamSearch(Optimizer):
     
 if __name__ == '__main__':
     main()
