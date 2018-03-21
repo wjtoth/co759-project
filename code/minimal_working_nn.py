@@ -29,6 +29,8 @@ def main():
 
     parser.add_argument('--batch', type=int, default=64,
                         help='batch size to use for training')
+    parser.add_argument('--epochs', type=int, default=10,
+                        help='number of epochs to train for')
     parser.add_argument('--test-batch', type=int, default=0,
                         help='batch size to use for validation and testing')
     parser.add_argument('--data-root', type=str, default='',
@@ -44,15 +46,14 @@ def main():
     parser.add_argument('--no-val', action='store_true', default=False,
                         help='if specified, do not create a validation set from the training data and '
                              'use it to choose the best model')
-    #changed Default to True (Daniel)
-    parser.add_argument('--no-cuda', action='store_true', default=True,
+    parser.add_argument('--cuda', action='store_true', default=False,
                         help='if specified, use CPU only')
     parser.add_argument('--seed', type=int, default=468412397,
                         help='random seed')
     
     args = parser.parse_args()    
     
-    args.cuda = not args.no_cuda and torch.cuda.is_available()
+    args.cuda = args.cuda and torch.cuda.is_available()
     
     train_loader, val_loader, test_loader, num_classes = \
         create_datasets('cifar10', args.batch, args.test_batch, not args.no_aug, args.no_val, args.data_root,
@@ -62,12 +63,14 @@ def main():
 
     print("Creating Network...")
     net = ConvNet4()
+    if args.cuda:
+        net = net.cuda()
     print("Network Created")
     
     criterion = losses.multiclass_hinge_loss
     optimizer = optim.Adam(net.parameters(), lr=0.001)
     
-    for epoch in range(2):  # loop over the dataset multiple times
+    for epoch in range(args.epochs):  # loop over the dataset multiple times
         
         print("Starting training epoch %d..."%(epoch+1))
         
@@ -76,6 +79,8 @@ def main():
             #Friesen named labels as targets, changed to avoid confusion (Daniel)
             # wrap them in Variable
             inputs, labels = Variable(inputs), Variable(labels)
+            if args.cuda:
+                inputs, labels = inputs.cuda(), labels.cuda()
     
             # zero the parameter gradients
             optimizer.zero_grad()
@@ -87,7 +92,7 @@ def main():
             optimizer.step()
     
             # print statistics
-            if i % 10 == 0:    # print every 10 mini-batches
+            if i % 50 == 0:    # print every 50 mini-batches
                 loss = loss.data[0]
                 print('Epoch: %d, Batch: %5d, Loss: %.3f'%(epoch + 1, i + 1, loss))
 
