@@ -38,7 +38,10 @@ def generate_adversarial_examples(model, attack, dataset, criterion,
             criterion = criterion(target_class)
 
     attack = attack(model=model, criterion=criterion)
-    return [(attack(image, label), label) for image, label in dataset]
+    examples = []
+    for image, label in dataset:
+        examples.append((attack(image, label, epsilons=[.1]), label))
+    return examples
 
 
 def adversarial_eval(model, adversarial_dataset, criterion="untargeted_misclassify", 
@@ -57,14 +60,14 @@ def adversarial_eval(model, adversarial_dataset, criterion="untargeted_misclassi
         logits = model.batch_predictions(images)
         predictions = np.argmax(logits, axis=1)
         if criterion == "untargeted_misclassify":
-            successes.extend(
+            failures.extend(
                 [predictions[j] != labels[j] for j in range(batch_size)])
         elif criterion == "untargeted_top5_misclassify":
             predictions = np.argpartition(logits, -5)[-5:]
-            successes.extend(
+            failures.extend(
                 [labels[j] not in predictions[j] for j in range(batch_size)])
         elif criterion == "targeted_correct_class":
-            successes.extend(
+            failures.extend(
                 [predictions[j] == target_class for j in range(batch_size)])
         else:
             raise ValueError("Unsupported criterion!")

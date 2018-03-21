@@ -49,6 +49,9 @@ def main():
     parser.add_argument('--no-val', action='store_true', default=False,
                         help='if specified, do not create a validation set '
                              'from the training data and use it to choose the best model')
+    parser.add_argument('--adv-eval', action='store_true', default=False, 
+                        help='if specified, evaluates the network on ' 
+                             'adversarial examples generated using FGSM')
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='if specified, use CPU only')
     parser.add_argument('--seed', type=int, default=468412397,
@@ -62,6 +65,13 @@ def main():
         create_datasets('cifar10', args.batch, args.test_batch, not args.no_aug, 
                         args.no_val, args.data_root, args.cuda, args.seed, 
                         args.nworkers, args.dbg_ds_size, args.download)
+    if args.adv_eval:
+        _, adv_eval_loader, _, num_classes = \
+            create_datasets('cifar10', args.batch, 1, not args.no_aug, 
+                            args.no_val, args.data_root, args.cuda, args.seed, 
+                            args.nworkers, args.dbg_ds_size, args.download)
+        adversarial_eval_dataset = [(image[0].numpy(), torch.LongTensor(label[0]).numpy()) 
+                                    for image, label in adv_eval_loader]
 
     print("Creating Network...")
     net = ConvNet4()
@@ -98,7 +108,17 @@ def main():
                 loss = loss.data[0]
                 print('Epoch: %d, Batch: %5d, Loss: %.3f'%(epoch + 1, i + 1, loss))
 
-    print('Finished Training')
+    print('Finished training')
+
+    if args.adv_eval:
+        net.eval()
+        print('Evaluating on adversarial examples...')
+        adversarial_examples = adversarial.generate_adversarial_examples(
+            net, "fgsm", adversarial_eval_dataset, "untargeted_misclassify", 
+            pixel_bounds=(-255, 255), num_classes=num_classes)
+        failure_rate = adversarial.adversarial_eval(net, adversarial_examples, 
+            "untargeted_misclassify", batch_size=args.test_batch)
+        print("Failure rate: %.2f\%" % failure_rate)
     
 class ConvNet4(nn.Module):
     def __init__(self, nonlin=nn.ReLU, use_bn=False, input_shape=(3, 32, 32)):
@@ -167,12 +187,12 @@ class StepF(Function):
         self.scale_by_grad_out = scale_by_grad_out
         self.target = None
         self.saved_grad_out = None
-        assert (not (self.tp_rule == tp.TPRule.SSTE and self.scale_by_grad_out), 
-                'scale_by_grad and SSTE are incompatible')
-        assert (not (self.tp_rule == tp.TPRule.STE and self.scale_by_grad_out), 
-                'scale_by_grad and STE are incompatible')
-        assert (not (self.tp_rule == tp.TPRule.Ramp and self.scale_by_grad_out), 
-                'scale_by_grad and Ramp are incompatible')
+        # assert not (self.tp_rule == tp.TPRule.SSTE and self.scale_by_grad_out), \
+        #     'scale_by_grad and SSTE are incompatible'
+        # assert not (self.tp_rule == tp.TPRule.STE and self.scale_by_grad_out), \
+        #     'scale_by_grad and STE are incompatible'
+        # assert not (self.tp_rule == tp.TPRule.Ramp and self.scale_by_grad_out), \
+        #     'scale_by_grad and Ramp are incompatible'
 
     def forward(self, input_):
         self.save_for_backward(input_)
