@@ -42,7 +42,7 @@
 
 \section{Gradient-based Methods and Adversarial Examples}
 
-For a $d$-layer deep neural network with hard-threshold units, let $h_{dj} \in \{-1, 1\}$ be the $j$th output activation in the $d$th hidden layer, $z_{dj}$ be the pre-activation output, and $t_{dj}$ be the target used during training via target propagation. Furthermore, write $T_{d} = \{t_{d1}, \ldots, t_{dk}\}$ and $Z_{d} = \{z_{d1}, \ldots, z_{dk}\}$, where $k$ is the number of units in the $d$th hidden layer. 
+For a $l$-layer deep neural network with hard-threshold units, let $h_{dj} \in \{-1, 1\}$ be the $j$th output activation in the $d$th hidden layer, $z_{dj}$ be the pre-activation output, and $t_{dj}$ be the target used during training via target propagation. Furthermore, write $T_{d} = \{t_{d1}, \ldots, t_{dk}\}$ and $Z_{d} = \{z_{d1}, \ldots, z_{dk}\}$, where $k$ is the number of units in the $d$th hidden layer. 
 
 The ``fast gradient sign method" (FGSM) for generating adversarial examples computes a max-norm constrained perturbation $\mathbf{\eta}$ for ``optimally" fooling the network given by
 $$\mathbf{\eta} = \epsilon \cdot \textrm{sign}(\nabla_{\mathbf{x}}L(\theta, \mathbf{x}, y)),$$ 
@@ -59,7 +59,7 @@ $$t_{dj}^{t+1} = \textrm{sign}\left(\mu t_{dj}^{t} - {{\partial \over \partial h
 
 Using a combinatorial optimization method (e.g. beam search, or a genetic algorithm) to set the targets for training a neural network via target propagation has the potential to make the continuous optimization problem more tractable by restricting it to a single one-layer perceptron and the combinatorial optimization problem more tractable by vastly reducing the search space from around $10^{5}$--$10^{10}$ parameters to only $10^{2}$--$10^{5}$ targets---although the targets vary per training example, and there are typically millions of examples processed during training, so the problem is not necessarily more tractable. 
 
-The target propagation training algorithm looks something like the following:
+The target propagation training algorithm looks something like the following (see Algorithms 1 and 2):
 
 \begin{algorithm}
 \caption{Mixed Convex-Combinatorial Target Propagation}
@@ -99,6 +99,14 @@ The target propagation training algorithm looks something like the following:
 \end{algorithm} 
 
 We may consider augmenting this method in various ways. For example, it may be beneficial to choose some candidate targets from past time steps with training examples of the same output target, a kind of target ``momentum". Note that this example augmentation would primarily make sense for targets in layers close to the output, since earlier layers tend to process detailed features that could deviate too greatly between inputs with the same output target (although this is only a problem to some extent). Furthermore, we might also choose some candidate targets derived from a gradient-based method as described above, allowing for a mixed continuous-combinatorial target setting approach that achieves the benefits of both while adding only a small overhead from computing the gradients.
+
+
+\section{Performance and Parallelization}
+
+Note that Algorithm 2, our efficient algorithm for mixed convex-combinatorial target propagation, has complexity $O(nlk^{2}p)$ for a vanilla feedforward neural network with $l$ layers and $k$ hidden units per layer, a population size of $p$ targets per layer per training step, and $n$ training examples, where we assume the batch size is 1.\footnote{This is a safe assumption since parallelizing training across the batch can be done efficiently.} On the other hand, standard continuous optimization via stochastic gradient descent and backpropagation has complexity $O(nlk^{2})$, the only significant difference in complexity arising from the use of a population of targets and the need for doing a forward pass through the network for each candidate target. Note though that each step in the second nested for-loop in Algorithm 2 only requires targets computed in the previous step, and each step in the inner for-loop that involves evaluating a candidate target is independent from every other step. Consequently, we can both parallelize computation across the target population and across batches---as one processor is running a step of the algorithm 
+at layer $d$ for batch $1$, another process can be running a step of the algorithm at layer $d+1$ for batch $2$, etc. Assuming equivalent computation time across batches and layers, we can process $l$ batches in parallel, potentially mitigating the overhead involved in parallelizing computations for individual layers. 
+
+
 
 
 \end{document} 
