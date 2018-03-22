@@ -31,8 +31,7 @@
 \makeatother
 
 \begin{document}
-\title{\uppercase{\textbf{\normalsize Improving and Evaluating the Training of Hard-Threshold Deep Neural Networks: \\
-Target Heuristics}}}
+\title{\uppercase{\textbf{\normalsize Improving and Evaluating the Training of Hard-Threshold Deep Neural Networks}}}
 %%% or, On the Use of Mixed Convex-Combinatorial Optimization for Deep Learning
 \author{\small{\textsc{}}}
 \date{\small{\textsc{\today}}}
@@ -62,7 +61,7 @@ Using a combinatorial optimization method (e.g. beam search, or a genetic algori
 The target propagation training algorithm looks something like the following:
 
 \begin{algorithm}
-\caption{}
+\caption{Mixed Convex-Combinatorial Target Propagation}
 \begin{algorithmic}  
 \FOR{each batch of training examples}
 \STATE{Run a forward pass through the network to obtain the activations (hidden state) for each layer}
@@ -73,6 +72,26 @@ The target propagation training algorithm looks something like the following:
 \STATE{Given the hidden state of the previous layer, run a forward pass through this layer and the next layer and calculate $L_{\textrm{next}}$, the next layer's loss (bootstrapping).}
 \ENDFOR
 \STATE{Choose targets and weights for this layer based on the losses.}
+\ENDFOR
+\ENDFOR
+\end{algorithmic}
+\end{algorithm} 
+
+\begin{algorithm}
+\caption{Efficient Mixed Convex-Combinatorial Target Propagation}
+\begin{algorithmic}  
+\FOR{each batch of training examples}
+\STATE{Choose a population of candidate targets for each layer}
+\FOR{each layer, starting at the last layer}
+\IF{at first layer}
+\STATE{Run a step of gradient descent on the perceptron associated to this layer based on $L(x, t_{\textrm{curr}})$, where $L$ is the loss function for the perceptron, $x$ is the input provided by the batch, and $t_{\textrm{curr}}$ is the current layer's target}
+\ELSE
+\FOR{each candidate target $t$ for the previous layer in the population}
+\STATE{Given the target $t$ as input, run a forward pass through this layer and calculate $L(h, t)$, where $h$ is the hidden state and $t_{\textrm{curr}}$ is the target associated to this layer}
+\ENDFOR
+\STATE{Choose the target vector $t_{\textrm{prev}}$ for the previous layer based on the losses}
+\STATE{Run a step of gradient descent on the perceptron associated to this layer based on $L(h, t_{\textrm{curr}})$, where $h$ is the hidden state associated to $t_{\textrm{prev}}$}
+\ENDIF
 \ENDFOR
 \ENDFOR
 \end{algorithmic}
