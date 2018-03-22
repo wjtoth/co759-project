@@ -57,8 +57,7 @@ def main():
     parser.add_argument('--seed', type=int, default=468412397,
                         help='random seed')
     
-    args = parser.parse_args()    
-    
+    args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
     
     train_loader, val_loader, test_loader, num_classes = \
@@ -66,69 +65,131 @@ def main():
                         args.no_val, args.data_root, args.cuda, args.seed, 
                         args.nworkers, args.dbg_ds_size, args.download)
     if args.adv_eval:
-        _, adv_eval_loader, _, num_classes = \
-            create_datasets('cifar10', args.batch, 1, not args.no_aug, 
-                            args.no_val, args.data_root, args.cuda, args.seed, 
-                            args.nworkers, args.dbg_ds_size, args.download)
-        adversarial_eval_dataset = [(image[0].numpy(), torch.LongTensor(label[0]).numpy()) 
-                                    for image, label in adv_eval_loader]
+        adversarial_eval_dataset = get_adversarial_dataset('cifar10', args)
 
-    print("Creating Network...")
-    net = ConvNet4()
+    print('Creating network...')
+    network = ConvNet4(nonlin=Step)
     if args.cuda:
-        net = net.cuda()
-    print("Network Created")
+        network = network.cuda()
     
     criterion = losses.multiclass_hinge_loss
-    optimizer = optim.Adam(net.parameters(), lr=0.001)
+    optimizer = optim.Adam(network.parameters(), lr=0.001)
     
-    for epoch in range(args.epochs):  # loop over the dataset multiple times
-        
-        print("Starting training epoch %d..."%(epoch+1))
-        
-        for i, (inputs, labels, index) in enumerate(train_loader):
-            
-            # Friesen named labels as targets, changed to avoid confusion (Daniel)
-            # wrap them in Variable
-            inputs, labels = Variable(inputs), Variable(labels)
-            if args.cuda:
-                inputs, labels = inputs.cuda(), labels.cuda()
-    
-            # zero the parameter gradients
-            optimizer.zero_grad()
-    
-            # forward + backward + optimize
-            outputs = net(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-    
-            # print statistics
-            if i % 50 == 0:    # print every 50 mini-batches
-                loss = loss.data[0]
-                print('Epoch: %d, Batch: %5d, Loss: %.3f'%(epoch + 1, i + 1, loss))
-
+    train(network, train_loader, criterion, optimizer, None, args.epochs)
     print('Finished training')
 
     if args.adv_eval:
-        net.eval()
         print('Evaluating on adversarial examples...')
-        adversarial_examples = adversarial.generate_adversarial_examples(
-            net, "fgsm", adversarial_eval_dataset, "untargeted_misclassify", 
-            pixel_bounds=(-255, 255), num_classes=num_classes)
-        failure_rate = adversarial.adversarial_eval(net, adversarial_examples, 
-            "untargeted_misclassify", batch_size=args.test_batch)
-        print("Failure rate: %.2f\%" % failure_rate)
+        failure_rate = evaluate_adversarially(
+            network, adversarial_eval_dataset, 'untargeted_misclassify', 
+            "fgsm", args.test_batch, num_classes)
+        print('Failure rate: %.2f\%' % failure_rate)
+
+
+class TargetPropOptimizer:
     
+    def __init__(self, modules, loss_functions, state=[]):
+        self.modules = modules
+        self.loss_functions = loss_functions
+        self.state = list(state)
+
+    def generate_targets(self, train_step, module_index, target, base_targets=None):
+        """
+        Subclasses should override this method.
+        Args:
+            train_step: Int.
+            module_index: Int.
+            target: torch.Tensor; target tensor for module module_index 
+                to be used for generating, evaluating, and choosing 
+                the targets of module module_index-1.
+            base_targets: List; set of target tensors to use for generating 
+                new targets (optional, default: None).
+        Should generate a target torch.Tensor, list of target torch.Tensors, 
+        or dictionary of target torch.Tensors and store it in the optimizer state.
+        """
+        raise NotImplementedError
+
+    def evaluate_targets(self, train_step, module_index, target):
+        """
+        Subclasses should override this method. The method should evaluate 
+        each stored target and update the state of the optimizer 
+        with the evaluation data. 
+        """
+        raise NotImplementedError
+
+    def choose_targets(self, train_step, module_index, target):
+        """
+        Subclasses should override this method. The method should filter 
+        the stored targets based on the evaluation data and return 
+        a target torch.Tensor, list of target torch.Tensors, 
+        or dictionary of target torch.Tensors.
+        """
+        raise NotImplementedError
+
+    def step(self, train_step, module_index, target, base_targets=None):
+        self.generate_targets(train_step, module_index, target, base_targets)
+        self.evaluate_targets(train_step, module_index, target)
+        return self.choose_targets(train_step, module_index, target)
+
+
+def train(model, dataset_loader, loss_function, optimizer, target_optimizer, epochs):
+    optimizers = [optimizer(module) for module in model.all_modules]
+    modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
+    target_optimizer = target_optimizer(
+        model.all_modules[::-1], [loss_function]*len(modules))
+    for epoch in range(epochs):
+        for i, (inputs, labels, _) in enumerate(dataset_loader):
+            train_step = epoch*len(dataset_loader) + i
+            inputs, labels = Variable(inputs), Variable(labels)
+            if args.cuda:
+                inputs, labels = inputs.cuda(), labels.cuda()
+            targets = labels
+            for j, (module, optimizer) in enumerate(modules):
+                optimizer.zero_grad()
+                if j == len(modules)-1:
+                    # no target generation at initial layer/module
+                    outputs = module(inputs)
+                    loss = criterion(outputs, targets)
+                else:
+                    targets, loss = target_optimizer.step(
+                        train_step, module_index, targets)
+                loss.backward()
+                optimizer.step()
+        if i % 10 == 0:
+            ouputs = model(inputs)
+            loss = loss_function(ouputs, labels)
+            print('epoch: %d, batch: %5d, loss: %.3f'%(epoch + 1, i + 1, loss.data[0]))
+
+
+def get_adversarial_dataset(dataset_name, terminal_args):
+    args = terminal_args
+    _, adv_eval_loader, _, _ = create_datasets(
+        dataset_name, args.batch, 1, not args.no_aug, 
+        args.no_val, args.data_root, args.cuda, args.seed, 
+        args.nworkers, args.dbg_ds_size, args.download)
+    return [(image[0].numpy(), torch.LongTensor(label[0]).numpy()) 
+            for image, label in adv_eval_loader]
+
+
+def evaluate_adversarially(model, dataset, criterion, 
+                           attack, batch_size, num_classes):
+    model.eval()
+    adversarial_examples = adversarial.generate_adversarial_examples(
+        model, attack, dataset, criterion, 
+        pixel_bounds=(-255, 255), num_classes=num_classes)
+    failure_rate = adversarial.adversarial_eval(
+        model, adversarial_examples, criterion, batch_size=batch_size)
+    return failure_rate
+
+
 class ConvNet4(nn.Module):
-    def __init__(self, nonlin=nn.ReLU, use_bn=False, input_shape=(3, 32, 32)):
+    def __init__(self, nonlin=nn.ReLU, use_batchnorm=False, input_shape=(3, 32, 32)):
         super(ConvNet4, self).__init__()
-        # self.nonlin = nonlin
-        self.use_bn = use_bn
-        self.conv1_size = 32  # 64 #32
-        self.conv2_size = 64  # 128 #64
-        self.fc1_size = 1024  # 200 #500 #1024
-        self.fc2_size = 10  # 1024 #200 #500 #1024
+        self.use_batchnorm = use_batchnorm
+        self.conv1_size = 32
+        self.conv2_size = 64
+        self.fc1_size = 1024
+        self.fc2_size = 10
 
         block1 = OrderedDict([
             ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, 
@@ -157,7 +218,7 @@ class ConvNet4(nn.Module):
             ('fc2', nn.Linear(self.fc1_size, self.fc2_size))
         ])
 
-        if not self.use_bn:
+        if not self.use_batchnorm:
             del block3['batchnorm1']
             del block4['batchnorm2']
 
@@ -172,6 +233,7 @@ class ConvNet4(nn.Module):
         x = self.all_modules(x)
         return x
 
+
 class StepF(Function):
     """
     A step function that returns values in {-1, 1} and uses targetprop to
@@ -182,7 +244,6 @@ class StepF(Function):
                  make01=False, scale_by_grad_out=False):
         super(StepF, self).__init__()
         self.tp_rule = targetprop_rule
-        # self.tp_grad_func = tp.TPRule.get_backward_func(self.tp_rule)
         self.make01 = make01
         self.scale_by_grad_out = scale_by_grad_out
         self.target = None
@@ -206,7 +267,7 @@ class StepF(Function):
         grad_input = None
         if self.needs_input_grad[0]:
             # compute targets = neg. sign of output grad, 
-            # where t \in {-1, 0, 1} (t=0 means ignore this unit)
+            # where t \in {-1, 0, 1} (t = 0 means ignore this unit)
             go = grad_output if self.saved_grad_out is None else self.saved_grad_out
             tp_grad_func = tp.TPRule.get_backward_func(self.tp_rule)
             grad_input, self.target = tp_grad_func(input_, go, self.target, self.make01)
@@ -223,6 +284,8 @@ class Step(nn.Module):
         self.tp_rule = targetprop_rule
         self.make01 = make01
         self.scale_by_grad_out = scale_by_grad_out
+        self.step_function = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
+                                   scale_by_grad_out=self.scale_by_grad_out)
         self.output_hook = None
 
     def __repr__(self):
@@ -234,20 +297,16 @@ class Step(nn.Module):
         self.output_hook = output_hook
 
     def forward(self, x):
-        y = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
-                  scale_by_grad_out=self.scale_by_grad_out)(x)
+        y = self.step_function(x)
         if self.output_hook:
             # detach the output from the input to the next layer, 
             # so we can perform target propagation
             z = Variable(y.data.clone(), requires_grad=True)
-            # assert self.output_hook, "output hook must exist, 
-            # otherwise output vars will be lost"
             self.output_hook(x, y, z)
             return z
         else:
             return y
-    
-#class BeamSearch(Optimizer):
-    
+
+
 if __name__ == '__main__':
     main()
