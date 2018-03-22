@@ -93,12 +93,17 @@ class TargetPropOptimizer:
         self.loss_functions = loss_functions
         self.state = list(state)
 
-    def generate_targets(self, train_step, module_index, target, base_targets=None):
+    def generate_targets(self, train_step, module_index, input, 
+                         label, target, base_targets=None):
         """
         Subclasses should override this method.
         Args:
             train_step: Int.
             module_index: Int.
+            input: torch.Tensor; input to the model corresponding 
+                to self.modules at this training step.
+            label: torch.Tensor; label corresponding to input 
+                at this training step.
             target: torch.Tensor; target tensor for module module_index 
                 to be used for generating, evaluating, and choosing 
                 the targets of module module_index-1.
@@ -109,7 +114,7 @@ class TargetPropOptimizer:
         """
         raise NotImplementedError
 
-    def evaluate_targets(self, train_step, module_index, target):
+    def evaluate_targets(self, train_step, module_index, input, label, target):
         """
         Subclasses should override this method. The method should evaluate 
         each stored target and update the state of the optimizer 
@@ -117,7 +122,7 @@ class TargetPropOptimizer:
         """
         raise NotImplementedError
 
-    def choose_targets(self, train_step, module_index, target):
+    def choose_targets(self, train_step, module_index, input, label, target):
         """
         Subclasses should override this method. The method should filter 
         the stored targets based on the evaluation data and return 
@@ -126,10 +131,14 @@ class TargetPropOptimizer:
         """
         raise NotImplementedError
 
-    def step(self, train_step, module_index, target, base_targets=None):
-        self.generate_targets(train_step, module_index, target, base_targets)
-        self.evaluate_targets(train_step, module_index, target)
-        return self.choose_targets(train_step, module_index, target)
+    def step(self, train_step, module_index, target, input=None, 
+             label=None, base_targets=None):
+        self.generate_targets(train_step, module_index, input, 
+                              label, target, base_targets)
+        self.evaluate_targets(train_step, module_index, 
+                              input, label, target)
+        return self.choose_targets(train_step, module_index, 
+                                   input, label, target)
 
 
 def train(model, dataset_loader, loss_function, optimizer, target_optimizer, epochs):
@@ -149,10 +158,10 @@ def train(model, dataset_loader, loss_function, optimizer, target_optimizer, epo
                 if j == len(modules)-1:
                     # no target generation at initial layer/module
                     outputs = module(inputs)
-                    loss = criterion(outputs, targets)
+                    loss = loss_function(outputs, targets)
                 else:
                     targets, loss = target_optimizer.step(
-                        train_step, module_index, targets)
+                        train_step, module_index, targets, label=labels)
                 loss.backward()
                 optimizer.step()
         if i % 10 == 0:
