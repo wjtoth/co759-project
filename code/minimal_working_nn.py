@@ -84,23 +84,18 @@ def main():
     #define nonlinear function to be used
     nonlin = Step
     
-    net1 = ConvNet4_1(nonlin=nonlin,input_shape=input_shape)
-    net2 = ConvNet4_2(nonlin=nonlin,input_shape=input_shape)
-    net3 = ConvNet4_3(nonlin=nonlin,input_shape=input_shape)
-    net4 = ConvNet4_4(nonlin=nonlin,input_shape=input_shape)
+    net = [ConvNet4_1(nonlin=nonlin,input_shape=input_shape),
+        ConvNet4_2(nonlin=nonlin,input_shape=input_shape),
+        ConvNet4_3(nonlin=nonlin,input_shape=input_shape),
+        ConvNet4_4(nonlin=nonlin,input_shape=input_shape)]
+    
     if args.cuda:
-        net1 = net1.cuda()
-        net2 = net2.cuda()
-        net3 = net3.cuda()
-        net4 = net4.cuda()
+        for i in range(4):
+            net[i].cuda()
     print("Network Created")
     
-    criterion = losses.multiclass_hinge_loss
-    optimizer1 = optim.Adam(net1.parameters())
-    optimizer2 = optim.Adam(net2.parameters())
-    optimizer3 = optim.Adam(net3.parameters())
-    optimizer4 = optim.Adam(net4.parameters())
-    
+    optimizer = [optim.Adam(net[i].parameters()) for i in range(4)]
+
     for epoch in range(args.epochs):  # loop over the dataset multiple times
         
         print("Starting training epoch %d..."%(epoch+1))
@@ -114,60 +109,69 @@ def main():
                 inputs, labels = inputs.cuda(), labels.cuda()
     
             # zero the parameter gradients
-            optimizer1.zero_grad()
-            optimizer2.zero_grad()
-            optimizer3.zero_grad()
-    
-            # forward and initialize the targets
-            targets12 = net1(inputs)
-            targets23 = net2(targets12)
-            targets34 = net3(targets23)
-            
-            #backward
-            #optimize weights from layer 4
-            bestloss = 0
-            for j in range(10):
-                optimizer4.zero_grad()
-                outputs = net4(targets34)
-                loss4 = criterion(outputs, labels)
-                loss4.backward(retain_graph=True)
-                loss = loss4.data[0]
-                print('Epoch: %d, Batch: %5d, Loss: %.3f'%(epoch + 1, i + 1, loss))
-                optimizer4.step()
-                bestloss = loss
-                
-            #play with target setting
-            target_copy = targets34.clone()
-            for j in range(10):
-                for k in range(10):
-                    print(target_copy[j][k])
-                    target_copy[j][k] = target_copy[j][k].neg()           
-                    print(target_copy[j][k])
-                    sys.exit()
-                    outputs = net4(target_copy)
-                    loss4 = criterion(outputs, labels)
-                    loss = loss4.data[0]
-                    print('Epoch: %d, Batch: %5d, Loss: %.3f'%(epoch + 1, i + 1, loss))
-                    #check movement
-                    if loss < bestloss:
-                        #update best solution
-                        bestloss = loss 
-                    else:
-                        #revert changes
-                        target_copy[j][k].neg()
-                                
-            sys.exit
-            
-            #optimize
-            optimizer1.step()
-            optimizer2.step()
-            optimizer3.step()
-    
-            # print statistics
-            if i % 50 == 0:    # print every 50 mini-batches
-                loss = loss4.data[0]
-                print('Epoch: %d, Batch: %5d, Loss: %.3f'%(epoch + 1, i + 1, loss))
+            for n in range(4):                
+                optimizer[i].zero_grad()
 
+            # forward and initialize the targets
+            targets12 = net[0](inputs)
+            targets23 = net[1](targets12)
+            targets34 = net[2](targets23)
+            
+            targets =  [inputs.data,targets12.data,targets23.data,targets34.data,labels.data]
+            
+            #backward from layer 4 to 0 (4,3,2,1)
+            for l in range(4,0,-1):
+                if l == 4:                    
+                    criterion = losses.multiclass_hinge_loss
+                else:
+                    criterion = partial(nn.functional.l1_loss,size_average=False)
+                print('Epoch: %d, Batch: %5d, Layer %d->%d'%(epoch + 1, i + 1, l, l+1))  
+                #optimize weights 
+                bestloss = 0
+                for j in range(100):
+                    optimizer[l-1].zero_grad()
+                    outputs = net[l-1](Variable(targets[l-1]))
+                    loss = criterion(outputs, Variable(targets[l]))
+                    loss.backward(retain_graph=True)
+                    loss = loss.data[0]
+                    print('Epoch: %d, Batch: %5d, Layer %d->%d, Loss: %.3f'%(epoch + 1, i + 1, l, l+1, loss))
+                    optimizer[l-1].step()
+                    bestloss = loss
+                    if bestloss < 0.01:
+                        break
+                
+                #local searching target settings, for layers 1-2, 2-3, 3-4, 4-output
+                if l > 1:                    
+                    for j,t in enumerate(targets[l-1]):
+                        print('Epoch: %d, Batch: %5d, Local Searching Layer %d->%d,  \
+                           Target %d,1, Loss: %.3f'%(epoch + 1, i + 1, l, l+1, j+1, bestloss))
+                        for k,tt in enumerate(t):
+                            #flip a target value
+                            targets[l-1][j][k] = -targets[l-1][j][k]
+                            
+                            #run targets through weights and activations
+                            outputs = net[l-1](Variable(targets[l-1]))
+                            
+                            #calculate loss
+                            loss = criterion(outputs, Variable(targets[l]))
+                            loss = loss.data[0]     
+                            
+                            #check if target setting improved loss
+                            if loss < bestloss:
+                                #update best solution
+                                bestloss = loss
+                            else:
+                                #revert changes                        
+                                targets[l-1][j][k] = -targets[l-1][j][k]   
+                                
+                            #break out for if targets are feasible enough
+                            if bestloss < 0.01:
+                                break
+                        if bestloss < 0.01:
+                            break    
+    
+    
+    #need to implement a forward pass on all networks and evaluate the test set
     print('Finished training')
 
     if args.adv_eval:
