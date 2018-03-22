@@ -1,7 +1,7 @@
 # python
 import argparse
 import numpy as np
-from util.reshapemodule import ReshapeBatch
+from functools import partial
 
 # pytorch
 import torch
@@ -18,6 +18,7 @@ import losses
 from datasets import create_datasets
 from collections import OrderedDict
 import targetprop as tp
+from util.reshapemodule import ReshapeBatch
 
 # ours
 import adversarial
@@ -73,7 +74,7 @@ def main():
         network = network.cuda()
     
     criterion = losses.multiclass_hinge_loss
-    optimizer = optim.Adam(network.parameters(), lr=0.001)
+    optimizer = partial(optim.Adam, lr=0.001)
     
     train(network, train_loader, criterion, optimizer, None, args.epochs)
     print('Finished training')
