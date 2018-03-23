@@ -147,8 +147,10 @@ def train(model, dataset_loader, loss_function, optimizer, epochs,
           target_optimizer=None, efficient_prop=True):
     train_per_layer = target_optimizer is not None or not efficient_prop
     if train_per_layer:
-        optimizers = [optimizer(module) for module in model.all_modules]
+        optimizers = [optimizer(module.parameters()) for module in model.all_modules]
         modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
+    else:
+        optimizer = optimizer(model.parameters())
     target_optimizer = target_optimizer(
         model.all_modules[::-1], [loss_function]*len(modules))
     for epoch in range(epochs):
@@ -178,7 +180,7 @@ def train(model, dataset_loader, loss_function, optimizer, epochs,
                     optimizer.step()
             else:
                 optimizer.zero_grad()
-                outputs = module(inputs)
+                outputs = model(inputs)
                 loss = loss_function(outputs, targets)
                 loss.backward()
                 optimizer.step()
