@@ -76,7 +76,8 @@ def main():
     criterion = losses.multiclass_hinge_loss
     optimizer = partial(optim.Adam, lr=0.001)
     
-    train(network, train_loader, criterion, optimizer, None, args.epochs)
+    train(network, train_loader, criterion, optimizer, 
+          args.epochs, target_optimizer=None)
     print('Finished training')
 
     if args.adv_eval:
@@ -142,33 +143,45 @@ class TargetPropOptimizer:
                                    input, label, target)
 
 
-def train(model, dataset_loader, loss_function, optimizer, target_optimizer, epochs):
-    optimizers = [optimizer(module) for module in model.all_modules]
-    modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
+def train(model, dataset_loader, loss_function, optimizer, epochs, 
+          target_optimizer=None, efficient_prop=True):
+    train_per_layer = target_optimizer is not None or not efficient_prop
+    if train_per_layer:
+        optimizers = [optimizer(module) for module in model.all_modules]
+        modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
     target_optimizer = target_optimizer(
         model.all_modules[::-1], [loss_function]*len(modules))
     for epoch in range(epochs):
         for i, (inputs, labels, _) in enumerate(dataset_loader):
+            if i % 10 == 0:
+                if train_per_layer:
+                    ouputs = model(inputs)
+                    loss = loss_function(ouputs, labels)
+                print('epoch: %d, batch: %5d, loss: %.3f' 
+                      % (epoch + 1, i + 1, loss.data[0]))
             train_step = epoch*len(dataset_loader) + i
             inputs, labels = Variable(inputs), Variable(labels)
             if args.cuda:
                 inputs, labels = inputs.cuda(), labels.cuda()
             targets = labels
-            for j, (module, optimizer) in enumerate(modules):
+            if train_per_layer:
+                for j, (module, optimizer) in enumerate(modules):
+                    optimizer.zero_grad()
+                    if j == len(modules)-1:
+                        # no target generation at initial layer/module
+                        outputs = module(inputs)
+                        loss = loss_function(outputs, targets)
+                    else:
+                        targets, loss = target_optimizer.step(
+                            train_step, module_index, targets, label=labels)
+                    loss.backward()
+                    optimizer.step()
+            else:
                 optimizer.zero_grad()
-                if j == len(modules)-1:
-                    # no target generation at initial layer/module
-                    outputs = module(inputs)
-                    loss = loss_function(outputs, targets)
-                else:
-                    targets, loss = target_optimizer.step(
-                        train_step, module_index, targets, label=labels)
+                outputs = module(inputs)
+                loss = loss_function(outputs, targets)
                 loss.backward()
                 optimizer.step()
-        if i % 10 == 0:
-            ouputs = model(inputs)
-            loss = loss_function(ouputs, labels)
-            print('epoch: %d, batch: %5d, loss: %.3f'%(epoch + 1, i + 1, loss.data[0]))
 
 
 def get_adversarial_dataset(dataset_name, terminal_args):
