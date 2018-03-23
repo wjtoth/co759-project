@@ -2,6 +2,7 @@
 import argparse
 import numpy as np
 from functools import partial
+from time import time
 
 # pytorch
 import torch
@@ -69,7 +70,7 @@ def main():
         adversarial_eval_dataset = get_adversarial_dataset('cifar10', args)
 
     print('Creating network...')
-    network = ConvNet4(nonlin=Step)
+    network = ConvNet4(nonlin=nn.ReLU)
     if args.cuda:
         network = network.cuda()
     
@@ -77,7 +78,7 @@ def main():
     optimizer = partial(optim.Adam, lr=0.001)
     
     train(network, train_loader, criterion, optimizer, 
-          args.epochs, target_optimizer=None)
+          args.epochs, target_optimizer=None, use_gpu=args.cuda)
     print('Finished training')
 
     if args.adv_eval:
@@ -143,27 +144,34 @@ class TargetPropOptimizer:
                                    input, label, target)
 
 
-def train(model, dataset_loader, loss_function, optimizer, epochs, 
-          target_optimizer=None, efficient_prop=True):
-    train_per_layer = target_optimizer is not None or not efficient_prop
+def train(model, dataset_loader, loss_function, 
+          optimizer, epochs, target_optimizer=None, use_gpu=True):
+    train_per_layer = target_optimizer is not None
     if train_per_layer:
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
         modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
+        target_optimizer = target_optimizer(
+            list(model.all_modules)[::-1], [loss_function]*len(model.all_modules))
     else:
         optimizer = optimizer(model.parameters())
-    target_optimizer = target_optimizer(
-        model.all_modules[::-1], [loss_function]*len(modules))
     for epoch in range(epochs):
+        last_time = time()
         for i, (inputs, labels, _) in enumerate(dataset_loader):
-            if i % 10 == 0:
+            if i % 10 == 1:
                 if train_per_layer:
                     ouputs = model(inputs)
                     loss = loss_function(ouputs, labels)
-                print('epoch: %d, batch: %5d, loss: %.3f' 
-                      % (epoch + 1, i + 1, loss.data[0]))
+                if i == 1:
+                    steps = 1
+                else:
+                    steps = 10
+                current_time = time() 
+                print('epoch: %d, batch: %d, loss: %.3f, steps/sec: %.2f' 
+                      % (epoch+1, i+1, loss.data[0], steps/(current_time-last_time)))
+                last_time = current_time
             train_step = epoch*len(dataset_loader) + i
             inputs, labels = Variable(inputs), Variable(labels)
-            if args.cuda:
+            if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
             targets = labels
             if train_per_layer:
