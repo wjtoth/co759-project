@@ -76,9 +76,10 @@ def main():
     
     criterion = losses.multiclass_hinge_loss
     optimizer = partial(optim.Adam, lr=0.001)
+    #localsearch_optimizer = LocalSearchOptimizer(list(network.all_modules)[::-1],criterion)
     
     train(network, train_loader, criterion, optimizer, 
-          args.epochs, target_optimizer=None, use_gpu=args.cuda)
+          args.epochs, target_optimizer=LocalSearchOptimizer, use_gpu=args.cuda)
     print('Finished training')
 
     if args.adv_eval:
@@ -143,6 +144,20 @@ class TargetPropOptimizer:
         return self.choose_targets(train_step, module_index, 
                                    input, label, target)
 
+class LocalSearchOptimizer(TargetPropOptimizer):
+
+    def __init__(self, modules, loss_functions, state=[]):
+        TargetPropOptimizer.__init__(self, modules, loss_functions, state)
+
+    def generate_targets(self, train_step, module_index, input, label, target, base_targets=None):
+        print(label)
+
+    def evaluate_targets(self, train_step, module_index, input, label, target):
+        print(target)
+
+    def choose_targets(self, train_step, module_index, input, label, target):
+        print(input)
+    
 
 def train(model, dataset_loader, loss_function, 
           optimizer, epochs, target_optimizer=None, use_gpu=True):
@@ -183,7 +198,7 @@ def train(model, dataset_loader, loss_function,
                         loss = loss_function(outputs, targets)
                     else:
                         targets, loss = target_optimizer.step(
-                            train_step, module_index, targets, label=labels)
+                            train_step, j, targets, label=labels)
                     loss.backward()
                     optimizer.step()
             else:
