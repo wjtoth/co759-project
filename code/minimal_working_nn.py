@@ -92,8 +92,9 @@ def main():
 
 class TargetPropOptimizer:
     
-    def __init__(self, modules, loss_functions, state=[]):
+    def __init__(self, modules, sizes, loss_functions, state=[]):
         self.modules = modules
+        self.sizes = sizes
         self.loss_functions = loss_functions
         self.state = list(state)
 
@@ -146,17 +147,43 @@ class TargetPropOptimizer:
 
 class LocalSearchOptimizer(TargetPropOptimizer):
 
-    def __init__(self, modules, loss_functions, state=[]):
-        TargetPropOptimizer.__init__(self, modules, loss_functions, state)
+    def __init__(self, modules, sizes, loss_functions, state=[]):
+        TargetPropOptimizer.__init__(self, modules, sizes, loss_functions, state)
 
     def generate_targets(self, train_step, module_index, input, label, target, base_targets=None):
-        print(label)
+        #unwrap Linear layer from Sequential
+        child = next(self.modules[module_index].children())
+        #generate a target
+        candidate_size = self.sizes[module_index]
+        candidate = torch.LongTensor(target.size()[0],candidate_size)
+        candidate.random_(0,2)
+        candidate.add_(candidate)
+        candidate.add_(-1)
+    
+        #set state to candidates
+        self.state = [candidate]
+        
 
     def evaluate_targets(self, train_step, module_index, input, label, target):
-        print(target)
-
+        loss_function = self.loss_functions[module_index]
+        candidate_loss_pairs = []
+        module = self.modules[module_index]
+        print(module)
+        for candidate in self.state:
+            print(candidate)
+            output = module.forward(Variable(candidate.type("torch.FloatTensor")))
+            print("target")
+            print(target)
+            test_target = target
+            if module_index > 0:
+                test_target = Variable(test_target)
+                
+            loss = loss_function(output, test_target)
+            candidate_loss_pairs.append((candidate,loss))
+        self.state = candidate_loss_pairs
+            
     def choose_targets(self, train_step, module_index, input, label, target):
-        print(input)
+        return self.state[0]
     
 
 def train(model, dataset_loader, loss_function, 
@@ -166,7 +193,7 @@ def train(model, dataset_loader, loss_function,
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
         modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
         target_optimizer = target_optimizer(
-            list(model.all_modules)[::-1], [loss_function]*len(model.all_modules))
+            list(model.all_modules)[::-1], model.input_sizes[::-1], [loss_function]*len(model.all_modules))
     else:
         optimizer = optimizer(model.parameters())
     for epoch in range(epochs):
@@ -238,6 +265,9 @@ class ConvNet4(nn.Module):
         self.conv2_size = 64
         self.fc1_size = 1024
         self.fc2_size = 10
+
+        self.input_sizes = [input_shape[0], self.conv1_size, (input_shape[1] // 4) * (input_shape[2] // 4) 
+                              * self.conv2_size, self.fc1_size]
 
         block1 = OrderedDict([
             ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, 
