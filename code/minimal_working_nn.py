@@ -155,7 +155,10 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         child = next(self.modules[module_index].children())
         #generate a target
         candidate_size = self.sizes[module_index]
-        candidate = torch.LongTensor(target.size()[0],candidate_size)
+        
+        candidate = torch.LongTensor()
+        #print(candidate_size)
+        candidate.resize_([64] + candidate_size)
         candidate.random_(0,2)
         candidate.add_(candidate)
         candidate.add_(-1)
@@ -168,18 +171,22 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         loss_function = self.loss_functions[module_index]
         candidate_loss_pairs = []
         module = self.modules[module_index]
-        print(module)
+        #print(module)
         for candidate in self.state:
-            print(candidate)
-            output = module.forward(Variable(candidate.type("torch.FloatTensor")))
-            print("target")
-            print(target)
+            #print(candidate)
+            output = module(Variable(candidate.type("torch.FloatTensor")))
+            #print("target")
+            #print(target)
             test_target = target
+
+            #print("output")
+            #print(output)
+            loss_fn = loss_function
             if module_index > 0:
-                test_target = Variable(test_target)
-                
-            loss = loss_function(output, test_target)
-            candidate_loss_pairs.append((candidate,loss))
+                loss_fn = torch.nn.MSELoss(size_average=False)
+                test_target = test_target.type("torch.FloatTensor")
+            loss = loss_fn(output, test_target)
+            candidate_loss_pairs.append((Variable(candidate),loss))
         self.state = candidate_loss_pairs
             
     def choose_targets(self, train_step, module_index, input, label, target):
@@ -201,8 +208,8 @@ def train(model, dataset_loader, loss_function,
         for i, (inputs, labels, _) in enumerate(dataset_loader):
             if i % 10 == 1:
                 if train_per_layer:
-                    ouputs = model(inputs)
-                    loss = loss_function(ouputs, labels)
+                    ouputs = model(Variable(inputs))
+                    loss = loss_function(ouputs, Variable(labels))
                 if i == 1:
                     steps = 1
                 else:
@@ -213,6 +220,7 @@ def train(model, dataset_loader, loss_function,
                 last_time = current_time
             train_step = epoch*len(dataset_loader) + i
             inputs, labels = Variable(inputs), Variable(labels)
+            
             if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
             targets = labels
@@ -222,7 +230,8 @@ def train(model, dataset_loader, loss_function,
                     if j == len(modules)-1:
                         # no target generation at initial layer/module
                         outputs = module(inputs)
-                        loss = loss_function(outputs, targets)
+                        loss = torch.nn.MSELoss(size_average=False)(outputs, targets.type("torch.FloatTensor"))
+                        #loss = loss_function(outputs, targets)
                     else:
                         targets, loss = target_optimizer.step(
                             train_step, j, targets, label=labels)
@@ -266,12 +275,12 @@ class ConvNet4(nn.Module):
         self.fc1_size = 1024
         self.fc2_size = 10
 
-        self.input_sizes = [input_shape[0], self.conv1_size, (input_shape[1] // 4) * (input_shape[2] // 4) 
-                              * self.conv2_size, self.fc1_size]
+        self.input_sizes = [list(input_shape), [self.conv1_size,(input_shape[1] // 4)*(input_shape[2] // 4)//4, self.conv2_size//4], [(input_shape[1] // 4) * (input_shape[2] // 4) 
+                              * self.conv2_size], [self.fc1_size]]
 
         block1 = OrderedDict([
             ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, 
-                                kernel_size=5, padding=3)),
+                                kernel_size=5, padding=2)),
             ('maxpool1', nn.MaxPool2d(2)),
             ('nonlin1', nonlin())
         ])
