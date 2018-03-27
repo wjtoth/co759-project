@@ -35,6 +35,8 @@ def main():
                         help='number of epochs to train for')
     parser.add_argument('--test-batch', type=int, default=0,
                         help='batch size to use for validation and testing')
+    parser.add_argument('--nonlin', type=str, default='relu',
+                        choices=('step01', 'step11', 'relu'))
     parser.add_argument('--data-root', type=str, default='',
                         help='root directory for imagenet dataset '
                              '(with separate train, val, test folders)')     
@@ -69,8 +71,20 @@ def main():
     if args.adv_eval:
         adversarial_eval_dataset = get_adversarial_dataset('cifar10', args)
 
+    args.nonlin = args.nonlin.lower()
+    if args.nonlin == 'relu':
+        nonlin = nn.ReLU
+    elif args.nonlin == 'step01':
+        nonlin = partial(Step, make01=True)
+    elif args.nonlin == 'step11':
+        nonlin = partial(Step, make01=False)
+
     print('Creating network...')
-    network = ConvNet4(nonlin=nn.ReLU)
+    network = ConvNet4(nonlin=nonlin)
+    network.needs_backward_twice = False
+    if args.nonlin.startswith('step'):
+        network.targetprop_rule = tp.TPRule.TruncWtHinge
+        network.needs_backward_twice = tp.needs_backward_twice(tp.TPRule.TruncWtHinge)
     if args.cuda:
         network = network.cuda()
     
@@ -86,7 +100,7 @@ def main():
         failure_rate = evaluate_adversarially(
             network, adversarial_eval_dataset, 'untargeted_misclassify', 
             "fgsm", args.test_batch, num_classes)
-        print('Failure rate: %.2f\%' % failure_rate)
+        print('Failure rate: %0.2f%%' % (100*failure_rate))
 
 
 class TargetPropOptimizer:
@@ -190,28 +204,32 @@ def train(model, dataset_loader, loss_function,
                 optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = loss_function(outputs, targets)
-                loss.backward()
+                loss.backward(retain_graph=model.needs_backward_twice)
+                if model.needs_backward_twice:
+                    optimizer.zero_grad()
+                    loss.backward()
                 optimizer.step()
 
 
-def get_adversarial_dataset(dataset_name, terminal_args):
+def get_adversarial_dataset(dataset_name, terminal_args, size=2000):
     args = terminal_args
-    _, adv_eval_loader, _, _ = create_datasets(
-        dataset_name, args.batch, 1, not args.no_aug, 
-        args.no_val, args.data_root, args.cuda, args.seed, 
-        args.nworkers, args.dbg_ds_size, args.download)
-    return [(image[0].numpy(), torch.LongTensor(label[0]).numpy()) 
-            for image, label in adv_eval_loader]
+    adv_eval_loader, _, _, _ = create_datasets(
+        dataset_name, 1, 1, not args.no_aug, args.no_val, args.data_root, 
+        args.cuda, args.seed, 1, args.dbg_ds_size, args.download)
+    return [(image[0].numpy(), label.numpy()) 
+            for image, label, _ in adv_eval_loader][:size]
 
 
 def evaluate_adversarially(model, dataset, criterion, 
                            attack, batch_size, num_classes):
+    if batch_size == 0:
+        batch_size = 1
     model.eval()
-    adversarial_examples = adversarial.generate_adversarial_examples(
+    adversarial_examples, foolbox_model = adversarial.generate_adversarial_examples(
         model, attack, dataset, criterion, 
         pixel_bounds=(-255, 255), num_classes=num_classes)
     failure_rate = adversarial.adversarial_eval(
-        model, adversarial_examples, criterion, batch_size=batch_size)
+        foolbox_model, adversarial_examples, criterion, batch_size=batch_size)
     return failure_rate
 
 
@@ -263,8 +281,8 @@ class ConvNet4(nn.Module):
         ]))
 
     def forward(self, x):
-        x = self.all_modules(x)
-        return x
+        y = self.all_modules(x)
+        return y
 
 
 class StepF(Function):
@@ -317,8 +335,6 @@ class Step(nn.Module):
         self.tp_rule = targetprop_rule
         self.make01 = make01
         self.scale_by_grad_out = scale_by_grad_out
-        self.step_function = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
-                                   scale_by_grad_out=self.scale_by_grad_out)
         self.output_hook = None
 
     def __repr__(self):
@@ -330,7 +346,8 @@ class Step(nn.Module):
         self.output_hook = output_hook
 
     def forward(self, x):
-        y = self.step_function(x)
+        y = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
+                  scale_by_grad_out=self.scale_by_grad_out)(x)
         if self.output_hook:
             # detach the output from the input to the next layer, 
             # so we can perform target propagation

@@ -40,36 +40,58 @@ def generate_adversarial_examples(model, attack, dataset, criterion,
     attack = attack(model=model, criterion=criterion)
     examples = []
     for image, label in dataset:
-        examples.append((attack(image, label, epsilons=[.1]), label))
-    return examples
+        adversarial_input = attack(image, int(label), epsilons=[.1, 1])
+        if adversarial_input is None:
+            # Misclassified input
+            examples.append(None)
+        else:
+            examples.append((adversarial_input, image, label))
+
+    return examples, model
 
 
-def adversarial_eval(model, adversarial_dataset, criterion="untargeted_misclassify", 
-                     batch_size=64, target_class=None):
+def adversarial_eval(foolbox_model, adversarial_dataset, 
+                     criterion="untargeted_misclassify", 
+                     batch_size=64, target_class=None, 
+                     against_labels=False):
     failures = []
     for i in range(len(adversarial_dataset) // batch_size):
         examples = adversarial_dataset[i*batch_size:(i+1)*batch_size]
-        images = [example[0] for example in examples]
-        labels = [example[1] for example in examples]
-        if images[0].ndim == 4:
-            images = np.concat(images)
-        elif images[0].ndim == 3:
-            images = np.concat([image[None,:] for image in images])
+        # Misclassified input counts as failure
+        # failures.extend([True]*examples.count(None))
+        examples = [example for example in examples if example is not None]
+        if not examples:
+            continue
+        adv_images = [example[0] for example in examples]
+        orig_images = [example[1] for example in examples]
+        labels = [example[2] for example in examples]
+        if adv_images[0].ndim == 4:
+            adv_images = np.concatenate(adv_images)
+            orig_images = np.concatenate(orig_images)
+        elif adv_images[0].ndim == 3:
+            adv_images = np.concatenate([image[None,:] for image in adv_images])
+            orig_images = np.concatenate([image[None,:] for image in orig_images])
         else:
             raise ValueError("Can't handle an adversarial example of that shape!")
-        logits = model.batch_predictions(images)
-        predictions = np.argmax(logits, axis=1)
+        adv_logits = foolbox_model.batch_predictions(adv_images)
+        orig_logits = foolbox_model.batch_predictions(orig_images)
+        adv_predictions = np.argmax(adv_logits, axis=1)
+        orig_predictions = np.argmax(orig_logits, axis=1)
+        if against_labels:
+            good_values = labels
+        else:
+            good_values = orig_predictions
         if criterion == "untargeted_misclassify":
             failures.extend(
-                [predictions[j] != labels[j] for j in range(batch_size)])
+                [int(adv_predictions[j]) != int(good_values[j]) for j in range(batch_size)])
         elif criterion == "untargeted_top5_misclassify":
-            predictions = np.argpartition(logits, -5)[-5:]
+            adv_predictions = np.argpartition(logits, -5)[-5:]
             failures.extend(
-                [labels[j] not in predictions[j] for j in range(batch_size)])
+                [int(good_values[j]) not in adv_predictions[j] for j in range(batch_size)])
         elif criterion == "targeted_correct_class":
             failures.extend(
-                [predictions[j] == target_class for j in range(batch_size)])
+                [int(adv_predictions[j]) == target_class for j in range(batch_size)])
         else:
             raise ValueError("Unsupported criterion!")
 
-    return failures / (batch_size * (len(adversarial_dataset)//batch_size))
+    return failures.count(True) / (batch_size * (len(adversarial_dataset)//batch_size))
