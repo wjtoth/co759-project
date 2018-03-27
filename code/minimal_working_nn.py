@@ -149,50 +149,82 @@ class LocalSearchOptimizer(TargetPropOptimizer):
 
     def __init__(self, modules, sizes, loss_functions, state=[]):
         TargetPropOptimizer.__init__(self, modules, sizes, loss_functions, state)
+        self.number_candidates = 1
 
-    def generate_targets(self, train_step, module_index, input, label, target, base_targets=None):
-        #unwrap Linear layer from Sequential
-        child = next(self.modules[module_index].children())
+    def boxflip(self, candidate, x0, y0, x1, y1):   
+        for i in range(x0, x1):
+            for j in range(y0, y1):
+                candidate[i][j] = -1 * candidate[i][j]
+        return candidate
+
+    def generate_candidate(self, module_index, target):
         #generate a target
         candidate_size = self.sizes[module_index]
-        
+                        
         candidate = torch.LongTensor()
         #print(candidate_size)
         candidate.resize_([64] + candidate_size)
         candidate.random_(0,2)
         candidate.add_(candidate)
         candidate.add_(-1)
-    
+
+        #Local Search Procedure
+        best_flip = -1
+        loss = self.evaluate_candidate(module_index, target, candidate)
+
+        row_length = candidate.size()[1]
+        search_steps = 10
+        #walking to local optimum will take too long
+        for k in range(0,search_steps):
+            #flip Tensor in chunks of rows to reduce number of loss evaluations
+            for i in range(0, 8):
+                candidate = self.boxflip(candidate, 8*i, 0, 8*(i+1), row_length)
+                new_loss = self.evaluate_candidate(module_index, target, candidate)
+                candidate = self.boxflip(candidate, 8*i, 0, 8*(i+1), row_length)
+                if new_loss.data[0] < loss.data[0]:
+                    loss = new_loss
+                    best_flip = i
+            if best_flip > -1:
+                candidate = self.boxflip(candidate, 8*best_flip, 0, 8*(best_flip+1), row_length)
         #set state to candidates
-        self.state = [candidate]
-        
+        self.state.append((Variable(candidate),loss))
 
-    def evaluate_targets(self, train_step, module_index, input, label, target):
+    def generate_targets(self, train_step, module_index, input, label, target, base_targets=None):
+        self.state=[]
+        for i in range(0, self.number_candidates):    
+            self.generate_candidate(module_index, target)
+
+
+    def evaluate_candidate(self, module_index, target, candidate):
         loss_function = self.loss_functions[module_index]
-        candidate_loss_pairs = []
         module = self.modules[module_index]
-        #print(module)
-        for candidate in self.state:
-            #print(candidate)
-            output = module(Variable(candidate.type("torch.FloatTensor")))
-            #print("target")
-            #print(target)
-            test_target = target
+        output = module(Variable(candidate.type("torch.FloatTensor")))
+        test_target = target
+        loss_fn = loss_function
+        if module_index > 0:
+            loss_fn = torch.nn.MSELoss(size_average=False)
+            test_target = test_target.type("torch.FloatTensor")
+        return loss_fn(output, test_target)
 
-            #print("output")
-            #print(output)
-            loss_fn = loss_function
-            if module_index > 0:
-                loss_fn = torch.nn.MSELoss(size_average=False)
-                test_target = test_target.type("torch.FloatTensor")
-            loss = loss_fn(output, test_target)
-            candidate_loss_pairs.append((Variable(candidate),loss))
-        self.state = candidate_loss_pairs
-            
+    def evaluate_targets(self, train_step, module_index, input, label, target): 
+        #NOOP Since generate targets does the work
+        #candidate_loss_pairs = []
+
+        #for candidate in self.state:
+ #           loss = self.evaluate_candidate(module_index, target, candidate)
+ #          candidate_loss_pairs.append((Variable(candidate),loss))
+        #self.state = candidate_loss_pairs
+        a = 1
+        
     def choose_targets(self, train_step, module_index, input, label, target):
-        return self.state[0]
-    
-
+        (best_candidate, best_loss) = self.state[0]
+        for i in range(1, len(self.state)):
+            (candidate, loss) = self.state[i]
+            if loss.data[0] < best_loss.data[0]:
+                best_candidate = candidate
+                best_loss = loss
+        return (best_candidate, best_loss)
+        
 def train(model, dataset_loader, loss_function, 
           optimizer, epochs, target_optimizer=None, use_gpu=True):
     train_per_layer = target_optimizer is not None
