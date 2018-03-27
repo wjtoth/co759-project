@@ -171,6 +171,10 @@ def train(model, dataset_loader, loss_function,
     for epoch in range(epochs):
         last_time = time()
         for i, (inputs, labels, _) in enumerate(dataset_loader):
+            train_step = epoch*len(dataset_loader) + i
+            inputs, labels = Variable(inputs), Variable(labels)
+            if use_gpu:
+                inputs, labels = inputs.cuda(), labels.cuda()
             if i % 10 == 1:
                 if train_per_layer:
                     ouputs = model(inputs)
@@ -183,10 +187,6 @@ def train(model, dataset_loader, loss_function,
                 print('epoch: %d, batch: %d, loss: %.3f, steps/sec: %.2f' 
                       % (epoch+1, i+1, loss.data[0], steps/(current_time-last_time)))
                 last_time = current_time
-            train_step = epoch*len(dataset_loader) + i
-            inputs, labels = Variable(inputs), Variable(labels)
-            if use_gpu:
-                inputs, labels = inputs.cuda(), labels.cuda()
             targets = labels
             if train_per_layer:
                 for j, (module, optimizer) in enumerate(modules):
