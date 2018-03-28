@@ -1,0 +1,28 @@
+              
+\documentclass[12pt]{article}
+ \usepackage[margin=1in]{geometry} 
+\usepackage{amsmath,amsthm,amssymb,amsfonts}
+ 
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Z}{\mathbb{Z}}
+ 
+\newenvironment{problem}[2][Problem]{\begin{trivlist}
+\item[\hskip \labelsep {\bfseries #1}\hskip \labelsep {\bfseries #2.}]}{\end{trivlist}}
+ 
+\begin{document}
+\textbf{Intro} \\
+
+Neural networks were developed in the 1950's not long after artificial intelligence (AI) research began. Neural networks are meant to simulate the biological function of the brain. They're computing systems made up of artificial neurons that are supposed to mimic the function of the neurons in the brain. However, given that the brain is the most complex organ in the body, modelling brain function in a neural network was a very ambitious thought at the time. As a result, early neural networks were extremely basic and came no where near close to simulating real biological neuron function. More specifically, early neural networks could only simulate a very limited number of neurons at once, which meant that they could not recognize complex patterns (should put an example of what a complex pattern is). In the last decade, Dr. Geoffrey Hinton from the University or Toronto, Dr. Yoshua Benjio from the University of Montreal, and many other researchers have made fundamental breakthroughs in what we know today as Deep Neural Networks. \\
+
+Deep neural networks are made up of many layers of artificial neurons that are `hidden" between the input and output layers, which we call `hidden layers". Each of these layers corresponds to a different level of abstraction, and help in learning different features, so more complex patterns can be learned by the whole network. In a deep neural network, each layer uses the output of the previous layer as input; the general idea being that each layer learns from the previous one, with each successive layer learns a more complex feature. Due to the multiple layers in deep neural networks, the complexity and size of the network require mass amounts of computing power to train efficiently. This can be very problematic, as GPU's and CPU's are not always readily available and can be extremely expensive. However, one way this problem can be solved is by network quantization. \\
+
+Quantized neural networks reduce computational complexity and enable low-precision inference by running with low-precision activations and/or weights and training with full complexity, where the quantized weights/activations are used to compute parameter gradients (Hubara et. al 2016). One way to reduce the complexity is to use a hard-threshold activation function on for each unit. An example of such a function is the sign function. While most deep neural networks are trained by minimizing an error function using backpropagation and gradient descent, these techniques cannot be implemented when learning networks with hard-threshold activations due to the fact that the derivative of such a function is zero everywhere and discontinuous at the origin. As a result, we must find a new way to learn these types of deep networks. \\
+
+We are interested in using target propagation to learn deep convolutional networks with hard-threshold activations. The main idea of this method is to compute targets for each unit at each layer, instead of computing gradients. Each feedforward unit's activation value is associated with a target value, rather than a loss gradient. This method explicitly associates a target value with the output value of each activation in the network. Then it updates each layer's weights in order to make the activation values closer to the targets. The target value is meant to provide a smaller loss, which is why we want to optimize the weights in such a way that the activation values are as close to the targets as possible. Similar to gradients, the targets are propagated backwards; by treating each layer (starting from the output layer) as an individual perceptron, we work backwards through the network to update the weights working with each layer separately. In general, we use the $i+1^{st}$ layer's targets to set the $i^{th}$ layer's targets and update the weights locally. \\
+
+The question we want to explore is how to set these target values at each layer. According to Friesen et al. (2017), setting the target values breaks down into a discrete optimization problem. Building off of Friesen et al. (2017)'s work, we are interested in developing efficient techniques for learning deep convolutional neural networks with hard-threshold units by experimenting with different discrete optimization heuristics. We develop a target propagation algorithm using combinatorial optimization to set the target values for training a deep convolutional neural network.  
+
+ 
+
+
+\end{document}
