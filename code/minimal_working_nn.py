@@ -1,8 +1,10 @@
 # python
+import sys
 import argparse
 import numpy as np
 from functools import partial
 from time import time
+from random import randint
 
 # pytorch
 import torch
@@ -70,6 +72,7 @@ def main():
         adversarial_eval_dataset = get_adversarial_dataset('cifar10', args)
 
     print('Creating network...')
+    
     network = ConvNet4(nonlin=nn.ReLU)
     if args.cuda:
         network = network.cuda()
@@ -79,7 +82,8 @@ def main():
     #localsearch_optimizer = LocalSearchOptimizer(list(network.all_modules)[::-1],criterion)
     
     train(network, train_loader, criterion, optimizer, 
-          args.epochs, target_optimizer=LocalSearchOptimizer, use_gpu=args.cuda)
+          args.epochs, target_optimizer=partial(GeneticOptimizer, \
+                  num_candidates = 10, num_generations = 20), use_gpu=args.cuda)
     print('Finished training')
 
     if args.adv_eval:
@@ -152,9 +156,10 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         self.number_candidates = 1
 
     def boxflip(self, candidate, x0, y0, x1, y1):   
-        for i in range(x0, x1):
-            for j in range(y0, y1):
-                candidate[i][j] = -1 * candidate[i][j]
+        #for i in range(x0, x1):
+        #    for j in range(y0, y1):
+        #        candidate[i][j] = -1 * candidate[i][j]
+        candidate[x0:x1,y0:y1] = -candidate[x0:x1,y0:y1]     
         return candidate
 
     def generate_candidate(self, module_index, target):
@@ -194,6 +199,133 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         for i in range(0, self.number_candidates):    
             self.generate_candidate(module_index, target)
 
+    
+    def evaluate_candidate(self, module_index, target, candidate):
+        loss_function = self.loss_functions[module_index]
+        module = self.modules[module_index]
+        output = module(Variable(candidate.type("torch.FloatTensor")))
+        test_target = target
+        loss_fn = loss_function
+        if module_index > 0:
+            loss_fn = torch.nn.MSELoss(size_average=False)
+            test_target = test_target.type("torch.FloatTensor")
+        return loss_fn(output, test_target)
+
+    def evaluate_targets(self, train_step, module_index, input, label, target): 
+        #NOOP Since generate targets does the work
+        #candidate_loss_pairs = []
+
+        #for candidate in self.state:
+ #           loss = self.evaluate_candidate(module_index, target, candidate)
+ #          candidate_loss_pairs.append((Variable(candidate),loss))
+        #self.state = candidate_loss_pairs
+        a=1
+    
+    def choose_targets(self, train_step, module_index, input, label, target):
+        (best_candidate, best_loss) = self.state[0]
+        for i in range(1, len(self.state)):
+            (candidate, loss) = self.state[i]
+            if loss.data[0] < best_loss.data[0]:
+                best_candidate = candidate
+                best_loss = loss
+        return (best_candidate, best_loss)
+    
+
+class Target:
+    def __init__(self, size, random=True):
+        #random initialization
+        self.size = [64] + size
+        self.values = torch.LongTensor(self.size[0],self.size[1])
+        self.values.zero_()
+        
+        if random:
+            self.values.random_(0,2)
+            self.values.add_(self.values)
+            self.values.add_(-1)
+
+        self.loss = 0
+        
+    def evaluate(self, target_optimizer, module_index, labels):
+        loss_function = target_optimizer.loss_functions[module_index]
+        module = target_optimizer.modules[module_index]
+        output = module(Variable(self.values.type("torch.FloatTensor")))
+        test_target = labels
+        loss_fn = loss_function
+        if module_index > 0:
+            loss_fn = torch.nn.MSELoss(size_average=False)
+            test_target = test_target.type("torch.FloatTensor")
+        self.loss = loss_fn(output, test_target)
+        
+    def crossover(self, parent_candidate1, parent_candidate2):
+        x0 = randint(1,self.size[0]-2)
+        y0 = randint(1,self.size[1]-2)
+           
+        self.values[:x0,:y0] = parent_candidate1.values[:x0,:y0] 
+        self.values[x0+1:,:y0] = parent_candidate1.values[x0+1:,:y0] 
+
+        self.values[:x0,y0+1:] = parent_candidate2.values[:x0,y0+1:] 
+        self.values[x0+1:,y0+1:] = parent_candidate2.values[x0+1:,y0+1:] 
+            
+class GeneticOptimizer(TargetPropOptimizer):
+
+    def __init__(self, modules, sizes, loss_functions, num_generations, num_candidates, state=[]):
+        TargetPropOptimizer.__init__(self, modules, sizes, loss_functions, state)
+        self.num_generations = num_generations
+        self.num_candidates = num_candidates
+    
+    def boxflip(self, candidate, x0, y0, x1, y1):   
+        candidate[x0:x1][y0:y1] = -candidate[x0:x1][y0:y1]     
+        return candidate
+
+    def generate_candidate(self, module_index, target):
+        
+        candidate_size = self.sizes[module_index]
+        
+        #generate a population of targets
+        population = []
+        for i in np.arange(0, self.num_candidates):
+            #generate a random candidate target
+            candidate = Target(candidate_size, random=True)
+            candidate.evaluate(self, module_index, target)            
+            population.append(candidate)
+            
+        #main loop
+        for i in np.arange(0, self.num_generations):
+            
+            #generate num_candidates children
+            for j in np.arange(0, self.num_candidates):
+                #choose two random parents, and append crossover to population
+                #some other condition for crossing two target setting could be used here
+                c1 = randint(0, self.num_candidates-1)
+                c2 = randint(0, self.num_candidates-1)
+                while c1 == c2:
+                    c1 = randint(0, self.num_candidates-1)
+                    c2 = randint(0, self.num_candidates-1)
+                
+                child_candidate = Target(candidate_size, random=False)
+                
+                child_candidate.crossover(population[c1], population[c2])
+                child_candidate.evaluate(self, module_index, target)            
+                
+                population.append(child_candidate)
+                
+            #mutate?
+        
+            #sort population based on loss
+            population.sort(key=lambda target: float(target.loss), reverse = False)
+            
+            #kill kill kill
+            population = population[0:self.num_candidates]
+            
+            #print("Generation: %d, best loss: %f"%(i,population[0].loss))
+             
+        #set state to candidates
+        self.state.append((Variable(population[0].values),population[0].loss))
+
+    def generate_targets(self, train_step, module_index, input, label, target, base_targets=None):
+        self.state=[]
+        for i in range(0, self.num_candidates):    
+            self.generate_candidate(module_index, target)
 
     def evaluate_candidate(self, module_index, target, candidate):
         loss_function = self.loss_functions[module_index]
@@ -232,7 +364,9 @@ def train(model, dataset_loader, loss_function,
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
         modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
         target_optimizer = target_optimizer(
-            list(model.all_modules)[::-1], model.input_sizes[::-1], [loss_function]*len(model.all_modules))
+            modules=list(model.all_modules)[::-1],\
+            sizes=model.input_sizes[::-1], \
+            loss_functions=[loss_function]*len(model.all_modules))
     else:
         optimizer = optimizer(model.parameters())
     for epoch in range(epochs):
@@ -275,7 +409,6 @@ def train(model, dataset_loader, loss_function,
                 loss = loss_function(outputs, targets)
                 loss.backward()
                 optimizer.step()
-
 
 def get_adversarial_dataset(dataset_name, terminal_args):
     args = terminal_args
