@@ -81,9 +81,11 @@ def main():
     optimizer = partial(optim.Adam, lr=0.001)
     #localsearch_optimizer = LocalSearchOptimizer(list(network.all_modules)[::-1],criterion)
     
+    #target_optimizer = LocalSearchOptimizer
+    target_optimizer = partial(GeneticOptimizer, num_candidates = 10, num_generations = 20)
+
     train(network, train_loader, criterion, optimizer, 
-          args.epochs, target_optimizer=partial(GeneticOptimizer, \
-                  num_candidates = 10, num_generations = 20), use_gpu=args.cuda)
+          args.epochs, target_optimizer=target_optimizer, use_gpu=args.cuda)
     print('Finished training')
 
     if args.adv_eval:
@@ -233,9 +235,9 @@ class LocalSearchOptimizer(TargetPropOptimizer):
 
 class Target:
     def __init__(self, size, random=True):
-        #random initialization
         self.size = [64] + size
-        self.values = torch.LongTensor(self.size[0],self.size[1])
+        self.values = torch.LongTensor()
+        self.values.resize_(self.size)
         self.values.zero_()
         
         if random:
@@ -278,7 +280,6 @@ class GeneticOptimizer(TargetPropOptimizer):
         return candidate
 
     def generate_candidate(self, module_index, target):
-        
         candidate_size = self.sizes[module_index]
         
         #generate a population of targets
@@ -286,7 +287,7 @@ class GeneticOptimizer(TargetPropOptimizer):
         for i in np.arange(0, self.num_candidates):
             #generate a random candidate target
             candidate = Target(candidate_size, random=True)
-            candidate.evaluate(self, module_index, target)            
+            candidate.evaluate(self, module_index, target)           
             population.append(candidate)
             
         #main loop
