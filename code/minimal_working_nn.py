@@ -39,6 +39,11 @@ def main():
                         help='batch size to use for validation and testing')
     parser.add_argument('--nonlin', type=str, default='relu',
                         choices=('step01', 'step11', 'relu'))
+    parser.add_argument('--comb-opt', action='store_true', default=False,
+                        help='if specified, combinatorial optimization methods ' 
+                             'are used for target setting')
+    parser.add_argument('--comb-opt-method', type=str, default='local_search',
+                        choices=('local_search', 'genetic'))
     parser.add_argument('--data-root', type=str, default='',
                         help='root directory for imagenet dataset '
                              '(with separate train, val, test folders)')     
@@ -57,7 +62,10 @@ def main():
                              'from the training data and use it to choose the best model')
     parser.add_argument('--adv-eval', action='store_true', default=False, 
                         help='if specified, evaluates the network on ' 
-                             'adversarial examples generated using FGSM')
+                             'adversarial examples generated using adv-attack')
+    parser.add_argument('--adv-attack', type=str, default='fgsm', 
+                        choices=tuple(adversarial.ATTACKS.keys()))
+    parser.add_argument('--adv-epsilon', type=float, default=0.25)
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='if specified, use CPU only')
     parser.add_argument('--seed', type=int, default=468412397,
@@ -93,8 +101,16 @@ def main():
     criterion = losses.multiclass_hinge_loss
     optimizer = partial(optim.Adam, lr=0.001)
 
-    target_optimizer = LocalSearchOptimizer
-    #target_optimizer = partial(GeneticOptimizer, num_candidates = 10, num_generations = 20)
+    if args.comb_opt:
+        if args.comb_opt_method == "local_search":
+            target_optimizer = LocalSearchOptimizer
+        elif args.comb_opt_method == "genetic":
+            target_optimizer = partial(
+                GeneticOptimizer, num_candidates=10, num_generations=20)
+        else:
+            raise NotImplementedError
+    else:
+        target_optimizer = None
     
     train(network, train_loader, criterion, optimizer, 
           args.epochs, target_optimizer=target_optimizer, use_gpu=args.cuda)
@@ -104,7 +120,8 @@ def main():
         print('Evaluating on adversarial examples...')
         failure_rate = evaluate_adversarially(
             network, adversarial_eval_dataset, 'untargeted_misclassify', 
-            "fgsm", args.test_batch, num_classes)
+            args.adv_attack, args.test_batch, num_classes, 
+            args.adv_epsilon, args.cuda)
         print('Failure rate: %0.2f%%' % (100*failure_rate))
 
 
@@ -279,7 +296,8 @@ class Target:
 
         self.values[:x0,y0+1:] = parent_candidate2.values[:x0,y0+1:] 
         self.values[x0+1:,y0+1:] = parent_candidate2.values[x0+1:,y0+1:] 
-            
+
+
 class GeneticOptimizer(TargetPropOptimizer):
 
     def __init__(self, modules, sizes, loss_functions, num_generations, num_candidates, state=[]):
@@ -370,6 +388,7 @@ class GeneticOptimizer(TargetPropOptimizer):
                 best_loss = loss
         return (best_candidate, best_loss)
 
+
 def train(model, dataset_loader, loss_function, 
           optimizer, epochs, target_optimizer=None, use_gpu=True):
     train_per_layer = target_optimizer is not None
@@ -433,14 +452,14 @@ def get_adversarial_dataset(dataset_name, terminal_args, size=2000):
             for image, label, _ in adv_eval_loader][:size]
 
 
-def evaluate_adversarially(model, dataset, criterion, 
-                           attack, batch_size, num_classes):
+def evaluate_adversarially(model, dataset, criterion, attack, 
+                           batch_size, num_classes, epsilon, cuda=True):
     if batch_size == 0:
         batch_size = 1
     model.eval()
     adversarial_examples, foolbox_model = adversarial.generate_adversarial_examples(
-        model, attack, dataset, criterion, 
-        pixel_bounds=(-255, 255), num_classes=num_classes)
+        model, attack, dataset, criterion, pixel_bounds=(-255, 255), 
+        num_classes=num_classes, epsilon=epsilon, cuda=cuda)
     failure_rate = adversarial.adversarial_eval(
         foolbox_model, adversarial_examples, criterion, batch_size=batch_size)
     return failure_rate

@@ -5,13 +5,20 @@ from torch import nn
 
 
 ATTACKS = {
-    "fgsm": foolbox.attacks.FGSM,
-    "iterative_fgsm": foolbox.attacks.IterativeGradientSignAttack,
-    "deep_fool": foolbox.attacks.DeepFoolAttack,
-    "saliency_map": foolbox.attacks.SaliencyMapAttack,
-    "single_pixel": foolbox.attacks.SinglePixelAttack,
-    "local_search": foolbox.attacks.LocalSearchAttack,
-    "boundary_attack": foolbox.attacks.BoundaryAttack,
+    "fgsm": {"class": foolbox.attacks.FGSM, 
+             "kwargs": {}},
+    "iterative_fgsm": {"class": foolbox.attacks.IterativeGradientSignAttack,
+                       "kwargs": {"steps": 10}},
+    "deep_fool": {"class": foolbox.attacks.DeepFoolAttack, 
+                  "kwargs": {"steps": 20, "subsample": 10}},
+    "saliency_map": {"class": foolbox.attacks.SaliencyMapAttack,
+                     "kwargs": {"max_iter": 200}},
+    "single_pixel": {"class": foolbox.attacks.SinglePixelAttack,
+                     "kwargs": {"max_pixels": 200}},
+    "local_search": {"class": foolbox.attacks.LocalSearchAttack,
+                     "kwargs": {}},
+    "boundary_attack": {"class": foolbox.attacks.BoundaryAttack,
+                        "kwargs": {"iterations": 200, "log_every_n_steps": 5}},
 }
 
 CRITERIA = {
@@ -24,14 +31,19 @@ CRITERIA = {
 def generate_adversarial_examples(model, attack, dataset, criterion, 
                                   pixel_bounds=(0, 255), num_classes=10, 
                                   channel_axis=1, cuda=True, preprocessing=None,
-                                  target_class=None):
+                                  target_class=None, epsilon=.25):
     if isinstance(model, nn.Module):
         preprocessing = (0, 1) if preprocessing is None else preprocessing
         model = foolbox.models.PyTorchModel(
             model, pixel_bounds, num_classes, cuda=cuda, 
             preprocessing=preprocessing)
     if isinstance(attack, str):
-        attack = ATTACKS[attack.strip().lower()]
+        attack_string = attack.strip().lower()
+        attack = ATTACKS[attack_string]
+        attack_kwargs = attack["kwargs"]
+        attack = attack["class"]
+        if "fgsm" in attack_string:
+            attack_kwargs["epsilons"] = [epsilon]
     if isinstance(criterion, str):
         criterion = CRITERIA[criterion.strip().lower()]
         if target_class is not None:
@@ -40,7 +52,7 @@ def generate_adversarial_examples(model, attack, dataset, criterion,
     attack = attack(model=model, criterion=criterion)
     examples = []
     for image, label in dataset:
-        adversarial_input = attack(image, int(label), epsilons=[.1, 1])
+        adversarial_input = attack(image, int(label), **attack_kwargs)
         if adversarial_input is None:
             # Misclassified input
             examples.append(None)
@@ -82,16 +94,19 @@ def adversarial_eval(foolbox_model, adversarial_dataset,
         else:
             good_values = orig_predictions
         if criterion == "untargeted_misclassify":
-            failures.extend(
-                [int(adv_predictions[j]) != int(good_values[j]) for j in range(batch_size)])
+            failures.extend([int(adv_predictions[j]) != int(good_values[j]) 
+                             for j in range(batch_size)])
         elif criterion == "untargeted_top5_misclassify":
             adv_predictions = np.argpartition(logits, -5)[-5:]
-            failures.extend(
-                [int(good_values[j]) not in adv_predictions[j] for j in range(batch_size)])
+            failures.extend([int(good_values[j]) not in adv_predictions[j] 
+                             for j in range(batch_size)])
         elif criterion == "targeted_correct_class":
-            failures.extend(
-                [int(adv_predictions[j]) == target_class for j in range(batch_size)])
+            failures.extend([int(adv_predictions[j]) == target_class 
+                             for j in range(batch_size)])
         else:
             raise ValueError("Unsupported criterion!")
 
+    print("Failures:", failures.count(True))
+    print("Adversarial examples:", 
+          (batch_size * (len(adversarial_dataset)//batch_size)))
     return failures.count(True) / (batch_size * (len(adversarial_dataset)//batch_size))
