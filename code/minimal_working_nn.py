@@ -385,14 +385,13 @@ class LocalSearchOptimizerFast(TargetPropOptimizer):
         target_batch = target_batch.view(
                 target_batch.shape[0]*target_batch.shape[1], 
                 *target_batch.shape[2:])
-        loss_shape = (len(candidates), int(np.prod(target.shape)))
         if self.use_gpu:
             candidate_var = Variable(candidate_batch).cuda()
         else:
             candidate_var = Variable(candidate_batch)
         output = module(candidate_var)
         losses = loss_function(output, target_batch)
-        losses = losses.view(*loss_shape)
+        losses = losses.view(len(candidates), int(np.prod(target.shape)))
         return losses.mean(dim=1)  # mean everything but candidate batch dim
     
     def choose_target(self, losses):
