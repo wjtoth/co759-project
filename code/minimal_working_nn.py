@@ -98,12 +98,12 @@ def main():
     if args.cuda:
         network = network.cuda()
     
-    criterion = multiclass_hinge_loss
+    criterion = partial(multiclass_hinge_loss, reduce_=False)
     optimizer = partial(optim.Adam, lr=0.001)
 
     if args.comb_opt:
         if args.comb_opt_method == 'local_search':
-            target_optimizer = LocalSearchOptimizer
+            target_optimizer = LocalSearchOptimizerFast
         elif args.comb_opt_method == 'genetic':
             target_optimizer = partial(
                 GeneticOptimizer, num_candidates=10, num_generations=20)
@@ -298,7 +298,7 @@ def convert_to_1hot(target, noutputs, make_11=True):
     return target_1hot
 
 
-def multiclass_hinge_loss(input_, target):
+def multiclass_hinge_loss(input_, target, reduce_=True):
     """Compute hinge loss: max(0, 1 - input * target)"""
     if input_.dim() == 2:
         noutputs = input_.shape[1]
@@ -311,7 +311,9 @@ def multiclass_hinge_loss(input_, target):
     if type(input_) is Variable:
         target_1hot = Variable(target_1hot)
     # max(0, 1-z*t)
-    loss = (-target_1hot * input_.float() + 1.0).clamp(min=0).sum(dim=1).mean(dim=0)
+    loss = (-target_1hot * input_.float() + 1.0).clamp(min=0).sum(dim=1)
+    if reduce_:
+        loss = loss.mean(dim=0)
     return loss
 
 
@@ -374,20 +376,27 @@ class LocalSearchOptimizerFast(TargetPropOptimizer):
     def evaluate_targets(self, module, loss_function, target, candidates):
         candidate_batch = torch.stack(candidates)
         target_batch = torch.stack([target]*len(candidates))
+        candidate_batch = candidate_batch.view(
+            candidate_batch.shape[0]*candidate_batch.shape[1], 
+            *candidate_batch.shape[2:])
+        target_batch = target_batch.view(
+                target_batch.shape[0]*target_batch.shape[1], 
+                *target_batch.shape[2:])
+        loss_shape = (len(candidates), int(np.prod(target.shape)))
         if self.use_gpu:
             candidate_var = Variable(candidate_batch).cuda()
         else:
             candidate_var = Variable(candidate_batch)
-        print(candidate_var.shape, target.shape)
         output = module(candidate_var)
-        # print(candidate_var.shape, candidates[0].shape, target.shape)
-        # print(output.shape, target_batch.shape)
         losses = loss_function(output, target_batch)
+        losses = losses.view(*loss_shape)
+        losses = losses.mean(dim=1)  # mean everything but candidate batch dim
         candidate_loss_pairs = list(zip(candidates, torch.split(losses, 1)))
         return candidate_loss_pairs
     
     def choose_target(self, candidates):
-        return min(candidates, key=lambda element: element[1].data[0])
+        return min(candidates, key=lambda element: element[1].data[0] 
+            if type(element[1].data[0]) is float else element[1].data[0][0])
 
     def step(self, train_step, module_index, target, input=None, 
              label=None, base_targets=None):
