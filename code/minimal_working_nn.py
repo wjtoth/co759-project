@@ -358,7 +358,8 @@ class LocalSearchOptimizerFast(TargetPropOptimizer):
                 candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
             candidate_losses = self.evaluate_targets(
                 module, loss_function, target, candidates)
-            candidate, loss = self.choose_target(candidate_losses)
+            candidate_index, loss = self.choose_target(candidate_losses)
+            candidate = candidates[int(candidate_index)]
 
         if self.use_gpu:
             candidate_var = Variable(candidate).cuda()
@@ -371,7 +372,9 @@ class LocalSearchOptimizerFast(TargetPropOptimizer):
         self.state = {"candidates": []}
         for i in range(0, self.searches):
             self.generate_candidate(module_index, target)
-        return self.choose_target(self.state["candidates"])
+        index, loss = self.choose_target(
+            [loss for candidate, loss in self.state["candidates"]])
+        return self.state["candidates"][index][0], loss
 
     def evaluate_targets(self, module, loss_function, target, candidates):
         candidate_batch = torch.stack(candidates)
@@ -390,13 +393,15 @@ class LocalSearchOptimizerFast(TargetPropOptimizer):
         output = module(candidate_var)
         losses = loss_function(output, target_batch)
         losses = losses.view(*loss_shape)
-        losses = losses.mean(dim=1)  # mean everything but candidate batch dim
-        candidate_loss_pairs = list(zip(candidates, torch.split(losses, 1)))
-        return candidate_loss_pairs
+        return losses.mean(dim=1)  # mean everything but candidate batch dim
     
-    def choose_target(self, candidates):
-        return min(candidates, key=lambda element: element[1].data[0] 
-            if type(element[1].data[0]) is float else element[1].data[0][0])
+    def choose_target(self, losses):
+        if isinstance(losses, list):
+            candidate_index, loss = min(
+                enumerate(losses), key=lambda element: element[1].data[0])
+        else:
+            loss, candidate_index =  torch.min(losses, 0)
+        return candidate_index, loss
 
     def step(self, train_step, module_index, target, input=None, 
              label=None, base_targets=None):
