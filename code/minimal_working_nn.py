@@ -103,10 +103,11 @@ def main():
 
     if args.comb_opt:
         if args.comb_opt_method == 'local_search':
-            target_optimizer = LocalSearchOptimizerFast
+            target_optimizer = partial(
+                LocalSearchOptimizerFast, candidates=10, iterations=10)
         elif args.comb_opt_method == 'genetic':
             target_optimizer = partial(
-                GeneticOptimizer, num_candidates=10, num_generations=20)
+                GeneticOptimizer, candidates=10, generations=20)
         else:
             raise NotImplementedError
     else:
@@ -359,7 +360,7 @@ class LocalSearchOptimizerFast(TargetPropOptimizer):
             candidate_losses = self.evaluate_targets(
                 module, loss_function, target, candidates)
             candidate_index, loss = self.choose_target(candidate_losses)
-            candidate = candidates[int(candidate_index)]
+            candidate = candidates[candidate_index.data[0]]
 
         if self.use_gpu:
             candidate_var = Variable(candidate).cuda()
