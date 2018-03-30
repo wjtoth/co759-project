@@ -10,15 +10,15 @@ ATTACKS = {
     "iterative_fgsm": {"class": foolbox.attacks.IterativeGradientSignAttack,
                        "kwargs": {"steps": 10}},
     "deep_fool": {"class": foolbox.attacks.DeepFoolAttack, 
-                  "kwargs": {"steps": 20, "subsample": 10}},
+                  "kwargs": {"steps": 25, "subsample": 10}},
     "saliency_map": {"class": foolbox.attacks.SaliencyMapAttack,
                      "kwargs": {"max_iter": 200}},
     "single_pixel": {"class": foolbox.attacks.SinglePixelAttack,
                      "kwargs": {"max_pixels": 200}},
     "local_search": {"class": foolbox.attacks.LocalSearchAttack,
-                     "kwargs": {}},
+                     "kwargs": {"R": 25}},
     "boundary_attack": {"class": foolbox.attacks.BoundaryAttack,
-                        "kwargs": {"iterations": 200, "log_every_n_steps": 5}},
+                        "kwargs": {"iterations": 50, "log_every_n_steps": 500}},
 }
 
 CRITERIA = {
