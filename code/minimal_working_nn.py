@@ -292,7 +292,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
             # Flip tensor in chunks of rows to reduce number of loss evaluations
             candidates = []
             for i in range(0, self.candidates):
-                perturb_size = candidate.shape[1] // self.candidates
+                perturb_size = candidate.size[1] // self.candidates
                 candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
                 candidates.append(candidate)
                 candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
