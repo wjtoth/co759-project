@@ -28,6 +28,7 @@ import adversarial
 
 
 def main():
+    start_time = time() 
     # argument definitions
     parser = argparse.ArgumentParser()
 
@@ -104,12 +105,12 @@ def main():
     if args.comb_opt:
         if args.comb_opt_method == 'local_search':
             target_optimizer = partial(
-                LocalSearchOptimizer, batch_size=args.batch, 
-                candidates=10, iterations=10)
+                LocalSearchOptimizer, batch_size=args.batch,
+                num_candidates=10, iterations=10)
         elif args.comb_opt_method == 'genetic':
             target_optimizer = partial(
-                GeneticOptimizer, batch_size=args.batch, candidates=10, 
-                parents=5, generations=10, populations=1)
+                GeneticOptimizer, batch_size=args.batch, 
+                population_size=10, crossover_rate=1, generations=10)
         else:
             raise NotImplementedError
     else:
@@ -117,7 +118,7 @@ def main():
 
     train(network, train_loader, criterion, optimizer, 
           args.epochs, target_optimizer=target_optimizer, use_gpu=args.cuda)
-    print('Finished training')
+    print('Finished training, total time= %d'%(start_time-time()))
 
     if args.adv_eval:
         print('Evaluating on adversarial examples...')
@@ -175,19 +176,27 @@ def multiclass_hinge_loss(input_, target, reduce_=True):
 
 
 class Target:
-    def __init__(self, size, random=True, use_gpu=True):
+    def __init__(self, size, random=True, use_gpu=True, clone=None):
         self.use_gpu = use_gpu
         self.size = size
         if self.use_gpu:
             self.values = torch.cuda.FloatTensor(*self.size)
         else:
             self.values = torch.FloatTensor(*self.size)
-        if random:
-            self.values.random_(0,2)
-            self.values.mul_(2)
-            self.values.add_(-1)
+
+        if clone == None:
+            if random:
+                self.values.random_(0,2)
+                self.values.mul_(2)
+                self.values.add_(-1)
+            else:
+                self.values.zero_()
         else:
-            self.values.zero_()
+            self.values = clone.values
+
+    def local_search(self, target_optimizer):
+        for x in xrange(1,10):
+            self.values
 
 class TargetPropOptimizer:
     
@@ -263,11 +272,14 @@ class TargetPropOptimizer:
                                    input, label, target)
 
 class LocalSearchOptimizer(TargetPropOptimizer):
+#find a local optimum target setting starting from a random setting
+#neighborhood is boxflip
+#passes a group of 10 changes at once trough the network
 
-    def __init__(self, modules, sizes, loss_functions, batch_size, candidates=10, 
+    def __init__(self, modules, sizes, loss_functions, batch_size, num_candidates=10, 
                  iterations=10, searches=1, state=[], use_gpu=True):
         super().__init__(modules, sizes, loss_functions, batch_size, state, use_gpu)
-        self.candidates = candidates
+        self.num_candidates = num_candidates
         self.iterations = iterations
         self.searches = searches
 
@@ -290,16 +302,27 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         # Local search to find candidates
         for k in range(0, self.iterations):
             # Flip tensor in chunks of rows to reduce number of loss evaluations
-            candidates = []
-            for i in range(0, self.candidates):
-                perturb_size = candidate.size[1] // self.candidates
-                candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
-                candidates.append(candidate)
-                candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
-            candidate_losses = self.evaluate_targets(
-                module, loss_function, target, candidates)
-            candidate_index, loss = self.choose_target(candidate_losses)
-            candidate = candidates[candidate_index.data[0]]
+            
+            #perturb_size = candidate.size[1] // self.num_candidates
+            # for i in range(0, self.num_candidates):
+            #     new_candidate = Target(candidate_size, random=True, use_gpu=self.use_gpu, clone=candidate)  
+            #     candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
+            #     candidates.append(candidate)
+            #     candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
+            # candidate_losses = self.evaluate_targets(
+            #     module, loss_function, target, candidates)
+            # candidate_index, loss = self.choose_target(candidate_losses)
+            # candidate = candidates[candidate_index.data[0]]
+            for j in range(0, candidate_size[1]):
+                candidates = [candidate]
+                for i in range(0, candidate_size[0]):
+                    new_candidate = Target(candidate_size, random=True, use_gpu=self.use_gpu, clone=candidate)
+                    new_candidate.values[i,j] = -new_candidate.values[i,j]
+                    candidates.append(new_candidate)
+                    candidate_losses = self.evaluate_targets(   
+                        module, loss_function, target, candidates)
+                candidate_index, loss = self.choose_target(candidate_losses)
+                candidate = candidates[candidate_index.data[0]]
 
         if self.use_gpu:
             candidate_var = Variable(candidate.values).cuda()
@@ -331,13 +354,12 @@ class LocalSearchOptimizer(TargetPropOptimizer):
 
 class GeneticOptimizer(TargetPropOptimizer):
 
-    def __init__(self, modules, sizes, loss_functions, batch_size, candidates=10, 
-                 parents=5, generations=5, populations=1, state=[], use_gpu=True):
+    def __init__(self, modules, sizes, loss_functions, batch_size, 
+        population_size=10, crossover_rate=1, generations=5, state=[], use_gpu=True):
         super().__init__(modules, sizes, loss_functions, batch_size, state, use_gpu)
-        self.candidates = candidates
-        self.parents = parents
+        self.population_size = population_size
+        self.crossover_rate = crossover_rate
         self.generations = generations
-        self.populations = populations
 
     def generate_candidate(self, module_index, target):
         loss_function = self.loss_functions[module_index]
@@ -349,26 +371,27 @@ class GeneticOptimizer(TargetPropOptimizer):
 
         # generate a population of targets
         population = []
-        for i in range(self.candidates):
+        for i in range(self.population_size):
             # generate a random candidate target
-            candidate = Target(candidate_size, random=True, use_gpu=self.use_gpu)    
-            population.append(candidate)
+            population.append(Target(candidate_size, random=True, use_gpu=self.use_gpu))
         candidate_losses = self.evaluate_targets(
                 module, loss_function, target, 
                 [target.values for target in population])
         population = self.filter_targets(population, candidate_losses)
 
+        num_crossover = self.crossover_rate*self.population_size
         # main loop
         for i in range(self.generations):
-            # generate children
-            for j in range(self.candidates):
+            # generate num_crossover new candidates by crossing over two random candidates
+            for j in num_crossover:
                 # choose two random parents, and add crossover to population
                 # some other condition for crossing two targets could be used here
                 c1, c2 = None, None
                 while c1 == c2:
                     c1 = randint(0, self.parents-1)
                     c2 = randint(0, self.parents-1)
-                child_candidate = self.crossover(module_index,population[c1], population[c2])          
+                child_candidate = self.crossover(module_index,population[c1], population[c2])         
+                child_candidate.local_search() 
                 population.append(child_candidate)
             candidate_losses = self.evaluate_targets(
                 module, loss_function, target, 
