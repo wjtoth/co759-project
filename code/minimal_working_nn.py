@@ -299,18 +299,25 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         # Generate a candidate target
         candidate  = Target(candidate_size, random=True, use_gpu=self.use_gpu)  
 
+
+        perturb_size = candidate.size[1] // self.num_candidates
         # Local search to find candidates
         for k in range(0, self.iterations):
             candidates = [candidate]
             # Flip tensor in chunks of rows to reduce number of loss evaluations
-            perturb_size = candidate.size[1] // self.num_candidates
-            for i in range(0, self.num_candidates): 
-                candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
-                candidates.append(candidate)
-                candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
+            for i in range(0, self.num_candidates):
+                new_candidate = self.boxflip(Target(candidate_size, random=True, use_gpu=self.use_gpu, clone=candidate), perturb_size*i, perturb_size*(i+1))
+                candidates.append(new_candidate)
+                # candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
+                # candidates.append(candidate)
+                # candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
             candidate_losses = self.evaluate_targets(
                 module, loss_function, target, candidates)
-            #print(candidate_losses)
+
+            for i in range(0, self.num_candidates-1):
+                if float(candidate_losses[i]) != float(candidate_losses[i+1]):
+                    print(candidate_losses)
+                    sys.exit()
             candidate_index, loss = self.choose_target(candidate_losses)
             candidate = candidates[candidate_index.data[0]]
 
