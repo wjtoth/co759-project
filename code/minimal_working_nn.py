@@ -273,7 +273,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
 
     @staticmethod
     def boxflip(candidate, y0, y1):
-        candidate[:,y0:y1] = -candidate[:,y0:y1]     
+        candidate.values[:,y0:y1] = -candidate.values[:,y0:y1]     
         return candidate
 
     def generate_candidate(self, module_index, target):
