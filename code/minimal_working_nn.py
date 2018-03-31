@@ -229,7 +229,7 @@ class TargetPropOptimizer:
     #     raise NotImplementedError
 
     def evaluate_targets(self, module, loss_function, target, candidates):
-        candidate_batch = torch.stack(candidates)
+        candidate_batch = torch.stack([c.values for c in candidates]])
         target_batch = torch.stack([target]*len(candidates))
         candidate_batch = candidate_batch.view(
             candidate_batch.shape[0]*candidate_batch.shape[1], 
