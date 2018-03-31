@@ -241,7 +241,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
 
     @staticmethod
     def boxflip(candidate, y0, y1):
-        candidate[:,y0:y1] = -candidate[:,y0:y1]     
+        candidate[:,y0:y1] = -candidate[:,y0:y1]
         return candidate
 
     def generate_candidate(self, module_index, target):
@@ -354,10 +354,10 @@ class Target:
 
 class GeneticOptimizer(TargetPropOptimizer):
 
-    def __init__(self, modules, sizes, loss_functions, generations=5, 
+    def __init__(self, modules, sizes, loss_functions, batch_size, generations=5, 
                  candidates=10, state=[], use_gpu=True):
         TargetPropOptimizer.__init__(
-            self, modules, sizes, loss_functions, state, use_gpu)
+            self, modules, sizes, loss_functions, batch_size, state, use_gpu)
         self.generations = generations
         self.candidates = candidates
 
