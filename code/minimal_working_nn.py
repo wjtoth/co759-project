@@ -98,7 +98,7 @@ def main():
     if args.cuda:
         network = network.cuda()
     
-    criterion = partial(multiclass_hinge_loss, reduce_=False)
+    criterion = partial(multiclass_hinge_loss, reduce_=False if args.comb_opt else True)
     optimizer = partial(optim.Adam, lr=0.001)
 
     if args.comb_opt:
