@@ -104,15 +104,15 @@ def main():
     if args.comb_opt:
         if args.comb_opt_method == 'local_search':
             target_optimizer = partial(
-                LocalSearchOptimizerFast, candidates=10, iterations=10)
+                LocalSearchOptimizer, batch_size=64, candidates=10, iterations=10)
         elif args.comb_opt_method == 'genetic':
             target_optimizer = partial(
-                GeneticOptimizer, candidates=10, generations=20)
+                GeneticOptimizer, batch_size=64, candidates=10, generations=20)
         else:
             raise NotImplementedError
     else:
         target_optimizer = None
-    
+
     train(network, train_loader, criterion, optimizer, 
           args.epochs, target_optimizer=target_optimizer, use_gpu=args.cuda)
     print('Finished training')
@@ -128,9 +128,10 @@ def main():
 
 class TargetPropOptimizer:
     
-    def __init__(self, modules, sizes, loss_functions, state=[], use_gpu=True):
+    def __init__(self, modules, sizes, loss_functions, 
+                 batch_size, state=[], use_gpu=True):
         self.modules = modules
-        self.sizes = sizes
+        self.sizes = [[batch_size] + shape for shape in sizes]
         self.loss_functions = loss_functions
         self.state = list(state)
         self.use_gpu = use_gpu
@@ -180,96 +181,6 @@ class TargetPropOptimizer:
         return self.choose_targets(train_step, module_index, 
                                    input, label, target)
 
-class LocalSearchOptimizer(TargetPropOptimizer):
-
-    def __init__(self, modules, sizes, loss_functions, candidates=10, 
-                 iterations=10, searches=1, state=[], use_gpu=True):
-        TargetPropOptimizer.__init__(
-            self, modules, sizes, loss_functions, state, use_gpu)
-        self.candidates = candidates
-        self.iterations = iterations
-        self.searches = searches
-
-    @staticmethod
-    def boxflip(candidate, y0, y1):
-        candidate[:,y0:y1] = -candidate[:,y0:y1]     
-        return candidate
-
-    def generate_candidate(self, module_index, target):
-        loss_function = self.loss_functions[module_index]
-        module = self.modules[module_index]
-        if module_index > 0:
-            target = target.float()
-            loss_function = torch.nn.MSELoss(size_average=False)
-        # generate a target
-        candidate_size = self.sizes[module_index]
-
-        candidate = torch.cuda.FloatTensor()
-        candidate.resize_([64] + candidate_size)
-        candidate.random_(0,2)
-        candidate.add_(candidate)
-        candidate.add_(-1)
-
-        # Local Search Procedure
-        best_flip = -1
-        loss = self.evaluate_candidate(module, loss_function, target, candidate)
-
-        row_length = candidate.shape[1]
-        # walking to local optimum will take too long
-        for k in range(0, self.iterations):
-            # flip Tensor in chunks of rows to reduce number of loss evaluations
-            for i in range(0, self.candidates):
-                perturb_size = candidate.shape[1] // self.candidates
-                candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
-                new_loss = self.evaluate_candidate(
-                    module, loss_function, target, candidate)
-                candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
-                if new_loss.data[0] < loss.data[0]:
-                    loss = new_loss
-                    best_flip = i
-            if best_flip > -1:
-                candidate = self.boxflip(candidate, perturb_size*best_flip, 
-                                         perturb_size*(best_flip+1))
-        # set state to candidates
-        if self.use_gpu:
-            candidate_var = Variable(candidate).cuda()
-        else:
-            candidate_var = Variable(candidate)
-        self.state.append((candidate_var, loss))
-
-    def generate_targets(self, train_step, module_index, 
-                         input, label, target, base_targets=None):
-        self.state = []
-        for i in range(0, self.searches):    
-            self.generate_candidate(module_index, target)
-    
-    def evaluate_candidate(self, module, loss_function, target, candidate):
-        if self.use_gpu:
-            candidate_var = Variable(candidate).cuda()
-        else:
-            candidate_var = Variable(candidate)
-        output = module(candidate_var)
-        return loss_function(output, target)
-
-    def evaluate_targets(self, train_step, module_index, input, label, target):
-        # NOOP Since generate targets does the work
-        # candidate_loss_pairs = []
-
-        # for candidate in self.state:
-           # loss = self.evaluate_candidate(module_index, target, candidate)
-           # candidate_loss_pairs.append((Variable(candidate), loss))
-        # self.state = candidate_loss_pairs
-        pass
-    
-    def choose_targets(self, train_step, module_index, input, label, target):
-        best_candidate, best_loss = self.state[0]
-        for i in range(1, len(self.state)):
-            candidate, loss = self.state[i]
-            if loss.data[0] < best_loss.data[0]:
-                best_candidate = candidate
-                best_loss = loss
-        return best_candidate, best_loss
-
 
 def convert_to_1hot(target, noutputs, make_11=True):
     if target.dim() == 1:
@@ -318,12 +229,12 @@ def multiclass_hinge_loss(input_, target, reduce_=True):
     return loss
 
 
-class LocalSearchOptimizerFast(TargetPropOptimizer):
+class LocalSearchOptimizer(TargetPropOptimizer):
 
-    def __init__(self, modules, sizes, loss_functions, candidates=10, 
+    def __init__(self, modules, sizes, loss_functions, batch_size, candidates=10, 
                  iterations=10, searches=1, state=[], use_gpu=True):
-        TargetPropOptimizer.__init__(
-            self, modules, sizes, loss_functions, state, use_gpu)
+        TargetPropOptimizer.__init__(self, modules, sizes, loss_functions, 
+                                     batch_size, state, use_gpu)
         self.candidates = candidates
         self.iterations = iterations
         self.searches = searches
@@ -341,11 +252,9 @@ class LocalSearchOptimizerFast(TargetPropOptimizer):
             loss_function = torch.nn.MSELoss(size_average=False, reduce=False)
 
         # Generate a candidate target
-        candidate_size = self.sizes[module_index]
-        candidate = torch.cuda.FloatTensor()
-        candidate.resize_([64] + candidate_size)
+        candidate = torch.cuda.FloatTensor(*self.sizes[module_index])
         candidate.random_(0,2)
-        candidate.add_(candidate)
+        candidate.mul_(2)
         candidate.add_(-1)
 
         # Local search to find candidates
@@ -412,7 +321,7 @@ class LocalSearchOptimizerFast(TargetPropOptimizer):
 class Target:
     def __init__(self, size, random=True, use_gpu=True):
         self.use_gpu = use_gpu
-        self.size = [64] + size
+        self.size = size
         self.values = torch.LongTensor()
         self.values.resize_(self.size)
         self.values.zero_()
