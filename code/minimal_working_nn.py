@@ -70,7 +70,7 @@ def main():
                         help='if specified, use CPU only')
     parser.add_argument('--seed', type=int, default=468412397,
                         help='random seed')
-    
+
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
     
@@ -108,7 +108,7 @@ def main():
                 candidates=10, iterations=10)
         elif args.comb_opt_method == 'genetic':
             target_optimizer = partial(
-                GeneticOptimizerFast, batch_size=args.batch, candidates=10, 
+                GeneticOptimizer, batch_size=args.batch, candidates=10, 
                 parents=5, generations=10, populations=1)
         else:
             raise NotImplementedError
@@ -323,7 +323,6 @@ class LocalSearchOptimizer(TargetPropOptimizer):
 
 
 class Target:
-
     def __init__(self, size, random=True, use_gpu=True):
         self.use_gpu = use_gpu
         self.size = size
@@ -337,17 +336,6 @@ class Target:
             self.values.add_(-1)
         else:
             self.values.zero_()
-        
-    def crossover(self, parent1, parent2):
-        x0 = randint(1, self.size[0]-2)
-        y0 = randint(1, self.size[1]-2)
-           
-        self.values[:x0,:y0] = parent1.values[:x0,:y0] 
-        self.values[x0+1:,:y0] = parent1.values[x0+1:,:y0] 
-
-        self.values[:x0,y0+1:] = parent2.values[:x0,y0+1:] 
-        self.values[x0+1:,y0+1:] = parent2.values[x0+1:,y0+1:] 
-
 
 class GeneticOptimizer(TargetPropOptimizer):
 
@@ -371,7 +359,7 @@ class GeneticOptimizer(TargetPropOptimizer):
         population = []
         for i in range(self.candidates):
             # generate a random candidate target
-            candidate = Target(candidate_size, random=True, use_gpu=self.use_gpu)           
+            candidate = Target(candidate_size, random=True, use_gpu=self.use_gpu)    
             population.append(candidate)
         candidate_losses = self.evaluate_targets(
                 module, loss_function, target, 
@@ -388,9 +376,7 @@ class GeneticOptimizer(TargetPropOptimizer):
                 while c1 == c2:
                     c1 = randint(0, self.parents-1)
                     c2 = randint(0, self.parents-1)
-                child_candidate = Target(
-                    candidate_size, random=False, use_gpu=self.use_gpu)
-                child_candidate.crossover(population[c1], population[c2])          
+                child_candidate = self.crossover(module_index,population[c1], population[c2])          
                 population.append(child_candidate)
             candidate_losses = self.evaluate_targets(
                 module, loss_function, target, 
@@ -449,6 +435,19 @@ class GeneticOptimizer(TargetPropOptimizer):
         return self.generate_targets(train_step, module_index, input, 
                                      label, target, base_targets)
 
+    def crossover(self, module_index, parent1, parent2):
+        candidate_size = self.sizes[module_index]
+        child_candidate = Target(candidate_size, random=False, use_gpu=self.use_gpu)
+           
+        x0 = randint(1, child_candidate.size[0]-2)
+        y0 = randint(1, child_candidate.size[1]-2)
+        child_candidate.values[:x0,:y0] = parent1.values[:x0,:y0] 
+        child_candidate.values[x0+1:,:y0] = parent1.values[x0+1:,:y0] 
+
+        child_candidate.values[:x0,y0+1:] = parent2.values[:x0,y0+1:] 
+        child_candidate.values[x0+1:,y0+1:] = parent2.values[x0+1:,y0+1:] 
+
+        return child_candidate
 
 def train(model, dataset_loader, loss_function, 
           optimizer, epochs, target_optimizer=None, use_gpu=True):
