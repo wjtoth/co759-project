@@ -74,7 +74,7 @@ def main():
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
     
-    train_loader, val_loader, test_loader, num_classes = \
+    train_loader, val_loader, _, num_classes = \
         create_datasets('cifar10', args.batch, args.test_batch, not args.no_aug, 
                         args.no_val, args.data_root, args.cuda, args.seed, 
                         args.nworkers, args.dbg_ds_size, args.download)
@@ -108,14 +108,14 @@ def main():
                 candidates=10, iterations=10)
         elif args.comb_opt_method == 'genetic':
             target_optimizer = partial(
-                GeneticOptimizerFast, batch_size=args.batch, candidates=10, 
+                GeneticOptimizer, batch_size=args.batch, candidates=10, 
                 parents=5, generations=10, populations=1)
         else:
             raise NotImplementedError
     else:
         target_optimizer = None
 
-    train(network, train_loader, criterion, optimizer, 
+    train(network, train_loader, val_loader, criterion, optimizer, 
           args.epochs, target_optimizer=target_optimizer, use_gpu=args.cuda)
     print('Finished training')
 
@@ -450,8 +450,23 @@ class GeneticOptimizer(TargetPropOptimizer):
                                      label, target, base_targets)
 
 
-def train(model, dataset_loader, loss_function, 
+def accuracy(prediction, target):
+    if type(target) == Variable:
+        target = target.data 
+    return 100 * prediction.max(dim=1)[1].eq(target).float().mean().cpu()
+
+
+def accuracy_topk(prediction, target, k=5):
+    if type(target) == Variable:
+        target = target.data 
+    _, predictions_top5 = torch.topk(prediction, k, dim=1, largest=True)
+    return 100 * (predictions_top5 == target.unsqueeze(1)).max(
+        dim=1)[0].float().mean().cpu()
+
+
+def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
           optimizer, epochs, target_optimizer=None, use_gpu=True):
+    model.train()
     train_per_layer = target_optimizer is not None
     if train_per_layer:
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
@@ -465,7 +480,9 @@ def train(model, dataset_loader, loss_function,
         optimizer = optimizer(model.parameters())
     for epoch in range(epochs):
         last_time = time()
-        for i, (inputs, labels, _) in enumerate(dataset_loader):
+        evaluate(model, eval_dataset_loader, loss_function, log=True, use_gpu=use_gpu)
+        model.train()
+        for i, (inputs, labels, _) in enumerate(train_dataset_loader):
             inputs, labels = Variable(inputs), Variable(labels)
             if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
@@ -473,13 +490,17 @@ def train(model, dataset_loader, loss_function,
                 if train_per_layer:
                     ouputs = model(inputs)
                     loss = loss_function(ouputs, labels)
+                    accuracy = accuracy(outputs, labels)
+                    accuracy_top5 = accuracy_topk(outputs, labels, k=5)
                 if i == 1:
                     steps = 1
                 else:
                     steps = 10
                 current_time = time() 
-                print('epoch: %d, batch: %d, loss: %.3f, steps/sec: %.2f' 
-                      % (epoch+1, i+1, loss.data[0], steps/(current_time-last_time)))
+                print('training --- epoch: %d, batch: %d, loss: %.3f, acc: %.3f, '
+                      'acc_top5: %.3f, steps/sec: %.2f' 
+                      % (epoch+1, i+1, loss.data[0], steps/(current_time-last_time), 
+                         accuracy, accuracy_top5))
                 last_time = current_time
             train_step = epoch*len(dataset_loader) + i
             targets = labels
@@ -505,6 +526,30 @@ def train(model, dataset_loader, loss_function,
                     optimizer.zero_grad()
                     loss.backward()
                 optimizer.step()
+
+
+def evaluate(model, dataset_loader, loss_function, log=True, use_gpu=True):
+    model.eval()
+    total_loss, total_accuracy, total_accuracy_top5 = 0, 0, 0
+    for inputs, labels, _ in enumerate(dataset_loader):
+        inputs = Variable(inputs, volatile=True)
+        labels = Variable(labels, volatile=True)
+        if use_gpu:
+            inputs, labels = inputs.cuda(), labels.cuda()
+        outputs = model(inputs)
+        loss = loss_function(outputs, labels).data[0]
+        total_loss += loss*data.shape[0]
+        total_accuracy += accuracy(outputs, labels)
+        total_accuracy_top5 += accuracy_topk(outputs, labels, k=5)
+
+    loss = total_loss / len(dataset_loader)
+    accuracy = total_accuracy / len(dataset_loader)
+    accuracy_top5 = total_accuracy_top5 / len(dataset_loader)
+    if log:
+        print('\nevaluation --- loss: %.3f, acc: %.3f, acc_top5: %.3f \n' 
+              % (loss, accuracy, accuracy_top5))
+    return loss, accuracy, accuracy_top5
+
 
 def get_adversarial_dataset(dataset_name, terminal_args, size=2000):
     args = terminal_args
