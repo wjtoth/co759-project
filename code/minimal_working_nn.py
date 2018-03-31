@@ -127,63 +127,6 @@ def main():
             args.adv_epsilon, args.cuda)
         print('Failure rate: %0.2f%%' % (100*failure_rate))
 
-
-class TargetPropOptimizer:
-    
-    def __init__(self, modules, sizes, loss_functions, 
-                 batch_size, state=[], use_gpu=True):
-        self.modules = modules
-        self.sizes = [[batch_size] + shape for shape in sizes]
-        self.loss_functions = loss_functions
-        self.state = list(state)
-        self.use_gpu = use_gpu
-
-    def generate_targets(self, train_step, module_index, input, 
-                         label, target, base_targets=None):
-        """
-        Subclasses should override this method.
-        Args:
-            train_step: Int.
-            module_index: Int.
-            input: torch.Tensor; input to the model corresponding 
-                to self.modules at this training step.
-            label: torch.Tensor; label corresponding to input 
-                at this training step.
-            target: torch.Tensor; target tensor for module module_index 
-                to be used for generating, evaluating, and choosing 
-                the targets of module module_index-1.
-            base_targets: List; set of target tensors to use for generating 
-                new targets (optional, default: None).
-        Should generate a target torch.Tensor, list of target torch.Tensors, 
-        or dictionary of target torch.Tensors and store it in the optimizer state.
-        """
-        raise NotImplementedError
-
-    def evaluate_targets(self, train_step, module_index, input, label, target):
-        """
-        Subclasses should override this method. The method should evaluate 
-        each stored target and update the state of the optimizer 
-        with the evaluation data. 
-        """
-        raise NotImplementedError
-
-    def choose_targets(self, train_step, module_index, input, label, target):
-        """
-        Subclasses should override this method. The method should filter 
-        the stored targets based on the evaluation data and return 
-        a target torch.Tensor, list of target torch.Tensors, 
-        or dictionary of target torch.Tensors.
-        """
-        raise NotImplementedError
-
-    def step(self, train_step, module_index, target, input=None, 
-             label=None, base_targets=None):
-        self.generate_targets(train_step, module_index, input, 
-                              label, target, base_targets)
-        return self.choose_targets(train_step, module_index, 
-                                   input, label, target)
-
-
 def convert_to_1hot(target, noutputs, make_11=True):
     if target.dim() == 1:
         if target.is_cuda:
@@ -231,6 +174,94 @@ def multiclass_hinge_loss(input_, target, reduce_=True):
     return loss
 
 
+class Target:
+    def __init__(self, size, random=True, use_gpu=True):
+        self.use_gpu = use_gpu
+        self.size = size
+        if self.use_gpu:
+            self.values = torch.cuda.FloatTensor(*self.size)
+        else:
+            self.values = torch.FloatTensor(*self.size)
+        if random:
+            self.values.random_(0,2)
+            self.values.mul_(2)
+            self.values.add_(-1)
+        else:
+            self.values.zero_()
+
+class TargetPropOptimizer:
+    
+    def __init__(self, modules, sizes, loss_functions, 
+                 batch_size, state=[], use_gpu=True):
+        self.modules = modules
+        self.sizes = [[batch_size] + shape for shape in sizes]
+        self.loss_functions = loss_functions
+        self.state = list(state)
+        self.use_gpu = use_gpu
+
+    def generate_targets(self, train_step, module_index, input, 
+                         label, target, base_targets=None):
+        """
+        Subclasses should override this method.
+        Args:
+            train_step: Int.
+            module_index: Int.
+            input: torch.Tensor; input to the model corresponding 
+                to self.modules at this training step.
+            label: torch.Tensor; label corresponding to input 
+                at this training step.
+            target: torch.Tensor; target tensor for module module_index 
+                to be used for generating, evaluating, and choosing 
+                the targets of module module_index-1.
+            base_targets: List; set of target tensors to use for generating 
+                new targets (optional, default: None).
+        Should generate a target torch.Tensor, list of target torch.Tensors, 
+        or dictionary of target torch.Tensors and store it in the optimizer state.
+        """
+        raise NotImplementedError
+
+    # def evaluate_targets(self, train_step, module_index, input, label, target):
+    #     """
+    #     Subclasses should override this method. The method should evaluate 
+    #     each stored target and update the state of the optimizer 
+    #     with the evaluation data. 
+    #     """
+    #     raise NotImplementedError
+
+    def evaluate_targets(self, module, loss_function, target, candidates):
+        candidate_batch = torch.stack(candidates)
+        target_batch = torch.stack([target]*len(candidates))
+        candidate_batch = candidate_batch.view(
+            candidate_batch.shape[0]*candidate_batch.shape[1], 
+            *candidate_batch.shape[2:])
+        target_batch = target_batch.view(
+                target_batch.shape[0]*target_batch.shape[1], 
+                *target_batch.shape[2:])
+        if self.use_gpu:
+            candidate_var = Variable(candidate_batch).cuda()
+        else:
+            candidate_var = Variable(candidate_batch)
+        output = module(candidate_var)
+        losses = loss_function(output, target_batch)
+        losses = losses.view(len(candidates), int(np.prod(target.shape)))
+        return losses.mean(dim=1)  # mean everything but candidate batch dim
+
+    def choose_targets(self, train_step, module_index, input, label, target):
+        """
+        Subclasses should override this method. The method should filter 
+        the stored targets based on the evaluation data and return 
+        a target torch.Tensor, list of target torch.Tensors, 
+        or dictionary of target torch.Tensors.
+        """
+        raise NotImplementedError
+
+    def step(self, train_step, module_index, target, input=None, 
+             label=None, base_targets=None):
+        self.generate_targets(train_step, module_index, input, 
+                              label, target, base_targets)
+        return self.choose_targets(train_step, module_index, 
+                                   input, label, target)
+
 class LocalSearchOptimizer(TargetPropOptimizer):
 
     def __init__(self, modules, sizes, loss_functions, batch_size, candidates=10, 
@@ -248,18 +279,13 @@ class LocalSearchOptimizer(TargetPropOptimizer):
     def generate_candidate(self, module_index, target):
         loss_function = self.loss_functions[module_index]
         module = self.modules[module_index]
+        candidate_size = self.sizes[module_index]
         if module_index > 0:
             target = target.float()
             loss_function = torch.nn.MSELoss(size_average=False, reduce=False)
 
         # Generate a candidate target
-        if self.use_gpu:
-            candidate = torch.cuda.FloatTensor(*self.sizes[module_index])
-        else:
-            candidate = torch.FloatTensor(*self.sizes[module_index])
-        candidate.random_(0,2)
-        candidate.mul_(2)
-        candidate.add_(-1)
+        candidate  = Target(candidate_size, random=True, use_gpu=self.use_gpu)  
 
         # Local search to find candidates
         for k in range(0, self.iterations):
@@ -289,24 +315,6 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         index, loss = self.choose_target(
             [loss for candidate, loss in self.state["candidates"]])
         return self.state["candidates"][index][0], loss
-
-    def evaluate_targets(self, module, loss_function, target, candidates):
-        candidate_batch = torch.stack(candidates)
-        target_batch = torch.stack([target]*len(candidates))
-        candidate_batch = candidate_batch.view(
-            candidate_batch.shape[0]*candidate_batch.shape[1], 
-            *candidate_batch.shape[2:])
-        target_batch = target_batch.view(
-                target_batch.shape[0]*target_batch.shape[1], 
-                *target_batch.shape[2:])
-        if self.use_gpu:
-            candidate_var = Variable(candidate_batch).cuda()
-        else:
-            candidate_var = Variable(candidate_batch)
-        output = module(candidate_var)
-        losses = loss_function(output, target_batch)
-        losses = losses.view(len(candidates), int(np.prod(target.shape)))
-        return losses.mean(dim=1)  # mean everything but candidate batch dim
     
     def choose_target(self, losses):
         if isinstance(losses, list):
@@ -320,22 +328,6 @@ class LocalSearchOptimizer(TargetPropOptimizer):
              label=None, base_targets=None):
         return self.generate_targets(train_step, module_index, input, 
                                      label, target, base_targets)
-
-
-class Target:
-    def __init__(self, size, random=True, use_gpu=True):
-        self.use_gpu = use_gpu
-        self.size = size
-        if self.use_gpu:
-            self.values = torch.cuda.FloatTensor(*self.size)
-        else:
-            self.values = torch.FloatTensor(*self.size)
-        if random:
-            self.values.random_(0,2)
-            self.values.mul_(2)
-            self.values.add_(-1)
-        else:
-            self.values.zero_()
 
 class GeneticOptimizer(TargetPropOptimizer):
 
@@ -397,24 +389,6 @@ class GeneticOptimizer(TargetPropOptimizer):
         index, loss = self.choose_target(
             [loss for candidate, loss in self.state["candidates"]])
         return self.state["candidates"][index][0], loss
-
-    def evaluate_targets(self, module, loss_function, target, candidates):
-        candidate_batch = torch.stack(candidates)
-        target_batch = torch.stack([target]*len(candidates))
-        candidate_batch = candidate_batch.view(
-            candidate_batch.shape[0]*candidate_batch.shape[1], 
-            *candidate_batch.shape[2:])
-        target_batch = target_batch.view(
-                target_batch.shape[0]*target_batch.shape[1], 
-                *target_batch.shape[2:])
-        if self.use_gpu:
-            candidate_var = Variable(candidate_batch).cuda()
-        else:
-            candidate_var = Variable(candidate_batch)
-        output = module(candidate_var)
-        losses = loss_function(output, target_batch)
-        losses = losses.view(len(candidates), int(np.prod(target.shape)))
-        return losses.mean(dim=1)  # mean everything but candidate batch dim
 
     def filter_targets(self, candidates, losses):
         for i in range(losses.shape[0]):
