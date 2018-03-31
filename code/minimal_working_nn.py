@@ -302,9 +302,9 @@ class LocalSearchOptimizer(TargetPropOptimizer):
             candidate = candidates[candidate_index.data[0]]
 
         if self.use_gpu:
-            candidate_var = Variable(candidate).cuda()
+            candidate_var = Variable(candidate.values).cuda()
         else:
-            candidate_var = Variable(candidate)
+            candidate_var = Variable(candidate.values)
         self.state["candidates"].append((candidate_var, loss))
 
     def generate_targets(self, train_step, module_index, 
