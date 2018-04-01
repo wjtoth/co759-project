@@ -39,6 +39,8 @@ def main():
                         help='batch size to use for validation and testing')
     parser.add_argument('--nonlin', type=str, default='relu',
                         choices=('step01', 'step11', 'relu'))
+    parser.add_argument('--loss', type=str, default='cross_entropy',
+                        choices=('cross_entropy', 'hinge'))
     parser.add_argument('--comb-opt', action='store_true', default=False,
                         help='if specified, combinatorial optimization methods ' 
                              'are used for target setting')
@@ -98,7 +100,12 @@ def main():
     if args.cuda:
         network = network.cuda()
     
-    criterion = partial(multiclass_hinge_loss, reduce_=False if args.comb_opt else True)
+    if args.loss == 'cross_entropy':
+        criterion = torch.nn.CrossEntropyLoss(
+            size_average=True, reduce=False if args.comb_opt else True)
+    elif args.loss == 'hinge':
+        criterion = partial(multiclass_hinge_loss, 
+                            reduce_=False if args.comb_opt else True)
     optimizer = partial(optim.Adam, lr=0.001)
 
     if args.comb_opt:
@@ -245,7 +252,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         candidate[:,y0:y1] = -candidate[:,y0:y1]     
         return candidate
 
-    def generate_candidate(self, module_index, target):
+    def generate_candidate(self, module_index, target, train_step):
         loss_function = self.loss_functions[module_index]
         module = self.modules[module_index]
         if module_index > 0:
@@ -261,9 +268,8 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         candidate.mul_(2)
         candidate.add_(-1)
 
-        perturb_size = candidate.shape[1] // self.candidates
-
         # Local search to find candidates
+        perturb_size = candidate.shape[1] // self.candidates
         for k in range(0, self.iterations):
             # Flip tensor in chunks of rows to reduce number of loss evaluations
             candidates = [candidate.clone()]
@@ -275,20 +281,24 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                 module, loss_function, target, candidates)
             candidate_index, loss = self.choose_target(candidate_losses)
             candidate = candidates[candidate_index.data[0]]
+        if train_step % 50 == 1:
+            print(candidate_losses.data)
 
         if self.use_gpu:
             candidate_var = Variable(candidate).cuda()
         else:
             candidate_var = Variable(candidate)
-        self.state["candidates"].append((candidate_var, loss))
+        self.state["candidates"].append((candidate_var.long(), loss))
 
     def generate_targets(self, train_step, module_index, 
                          input, label, target, base_targets=None):
         self.state = {"candidates": []}
         for i in range(0, self.searches):
-            self.generate_candidate(module_index, target)
+            self.generate_candidate(module_index, target, train_step)
         index, loss = self.choose_target(
             [loss for candidate, loss in self.state["candidates"]])
+        if train_step % 50 == 1:
+            print(loss.data[0])
         return self.state["candidates"][index][0], loss
 
     def evaluate_targets(self, module, loss_function, target, candidates):
@@ -476,7 +486,9 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
     else:
         optimizer = optimizer(model.parameters())
     for epoch in range(epochs):
-        evaluate(model, eval_dataset_loader, loss_function, log=True, use_gpu=use_gpu)
+        if epoch == 0:
+            evaluate(model, eval_dataset_loader, 
+                     loss_function, log=True, use_gpu=use_gpu)
         last_time = time()
         model.train()
         for i, (inputs, labels, _) in enumerate(train_dataset_loader):
@@ -484,11 +496,16 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
             if i % 10 == 1:
-                if train_per_layer:
-                    outputs = model(inputs)
-                    loss = loss_function(outputs, labels)
-                    batch_accuracy = accuracy(outputs, labels)
-                    batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5)
+                model.eval()
+                outputs = model(inputs)
+                # if i % 50 == 1:
+                #     print(outputs[10], labels[10])
+                #     print(outputs[20], labels[20])
+                #     print(outputs[55], labels[55])
+                #     print(outputs[60], labels[60])
+                loss = loss_function(outputs, labels)
+                batch_accuracy = accuracy(outputs, labels)
+                batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5)
                 if i == 1:
                     steps = 1
                 else:
@@ -499,6 +516,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                       % (epoch+1, i+1, loss.data[0], batch_accuracy, 
                          batch_accuracy_top5, steps/(current_time-last_time)))
                 last_time = current_time
+                model.train()
             train_step = epoch*len(train_dataset_loader) + i
             targets = labels
             if train_per_layer:
@@ -523,6 +541,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     optimizer.zero_grad()
                     loss.backward()
                 optimizer.step()
+        evaluate(model, eval_dataset_loader, loss_function, log=True, use_gpu=use_gpu)
 
 
 def evaluate(model, dataset_loader, loss_function, log=True, use_gpu=True):
