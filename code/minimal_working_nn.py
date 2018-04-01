@@ -495,8 +495,8 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 current_time = time() 
                 print('training --- epoch: %d, batch: %d, loss: %.3f, acc: %.3f, '
                       'acc_top5: %.3f, steps/sec: %.2f' 
-                      % (epoch+1, i+1, loss.data[0], steps/(current_time-last_time), 
-                         batch_accuracy, batch_accuracy_top5))
+                      % (epoch+1, i+1, loss.data[0], batch_accuracy, 
+                         batch_accuracy_top5, steps/(current_time-last_time)))
                 last_time = current_time
             train_step = epoch*len(train_dataset_loader) + i
             targets = labels
