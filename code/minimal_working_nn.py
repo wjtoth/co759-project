@@ -92,23 +92,25 @@ def main():
         nonlin = partial(Step, make01=False)
 
     print('Creating network...')
-    network = ConvNet4(nonlin=nonlin)
+    network = ConvNet4(nonlin=nonlin, separate_activations=not args.comb_opt)
     network.needs_backward_twice = False
     if args.nonlin.startswith('step'):
-        network.targetprop_rule = tp.TPRule.TruncWtHinge
-        network.needs_backward_twice = tp.needs_backward_twice(tp.TPRule.TruncWtHinge)
+        network.targetprop_rule = tp.TPRule.SoftHinge
+        network.needs_backward_twice = tp.needs_backward_twice(tp.TPRule.SoftHinge)
     if args.cuda:
         network = network.cuda()
     
     if args.loss == 'cross_entropy':
         criterion = torch.nn.CrossEntropyLoss(
-            size_average=True, reduce=False if args.comb_opt else True)
+            size_average=not args.comb_opt, reduce=not args.comb_opt)
     elif args.loss == 'hinge':
-        criterion = partial(multiclass_hinge_loss, 
-                            reduce_=False if args.comb_opt else True)
+        criterion = partial(multiclass_hinge_loss, reduce_=not args.comb_opt)
     optimizer = partial(optim.Adam, lr=0.001)
 
     if args.comb_opt:
+        if args.nonlin != 'step11':
+            raise NotImplementedError(
+                "Discrete opt methods currently only support nonlin = step11.")
         if args.comb_opt_method == 'local_search':
             target_optimizer = partial(
                 LocalSearchOptimizer, batch_size=args.batch, 
@@ -281,8 +283,11 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                 module, loss_function, target, candidates)
             candidate_index, loss = self.choose_target(candidate_losses)
             candidate = candidates[candidate_index.data[0]]
-        if train_step % 50 == 1:
-            print(candidate_losses.data)
+        #     if train_step % 50 == 1 and k == 0:
+        #         print("Layer", str(module_index) + ":")
+        #         print(candidate_losses.data)
+        # if train_step % 50 == 1:
+        #     print(candidate_losses.data)
 
         if self.use_gpu:
             candidate_var = Variable(candidate).cuda()
@@ -298,7 +303,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         index, loss = self.choose_target(
             [loss for candidate, loss in self.state["candidates"]])
         if train_step % 50 == 1:
-            print(loss.data[0])
+            print("Chosen target loss:", loss.data[0])
         return self.state["candidates"][index][0], loss
 
     def evaluate_targets(self, module, loss_function, target, candidates):
@@ -498,11 +503,6 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             if i % 10 == 1:
                 model.eval()
                 outputs = model(inputs)
-                # if i % 50 == 1:
-                #     print(outputs[10], labels[10])
-                #     print(outputs[20], labels[20])
-                #     print(outputs[55], labels[55])
-                #     print(outputs[60], labels[60])
                 loss = loss_function(outputs, labels)
                 batch_accuracy = accuracy(outputs, labels)
                 batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5)
@@ -520,6 +520,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             train_step = epoch*len(train_dataset_loader) + i
             targets = labels
             if train_per_layer:
+                layer_outputs = []
                 for j, (module, optimizer) in enumerate(modules):
                     optimizer.zero_grad()
                     if j == len(modules)-1:
@@ -531,6 +532,18 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         targets, loss = target_optimizer.step(
                             train_step, j, targets, label=labels)
                     loss.backward()
+                    if i % 100 == 1:
+                        layer = len(modules)-1-j
+                        for k, param in enumerate(module.parameters()):
+                            if k == 0:
+                                print('\nlayer {0} - weight matrices mean and variance: '
+                                      '{1:.8f}, {2:.8f}\n'.format(
+                                      layer, torch.mean(param.data), 
+                                      torch.std(param.data)))
+                                print('layer {0} - gradient mean and variance: '
+                                      '{1:.8f}, {2:.8f}\n'.format(
+                                      layer, torch.mean(param.grad.data), 
+                                      torch.std(param.grad.data)))
                     optimizer.step()
             else:
                 optimizer.zero_grad()
@@ -590,13 +603,15 @@ def evaluate_adversarially(model, dataset, criterion, attack,
 
 
 class ConvNet4(nn.Module):
-    def __init__(self, nonlin=nn.ReLU, use_batchnorm=False, input_shape=(3, 32, 32)):
+    def __init__(self, nonlin=nn.ReLU, use_batchnorm=False, 
+                 input_shape=(3, 32, 32), separate_activations=True):
         super(ConvNet4, self).__init__()
         self.use_batchnorm = use_batchnorm
         self.conv1_size = 32
         self.conv2_size = 64
         self.fc1_size = 1024
         self.fc2_size = 10
+        self.separate_activations = separate_activations
 
         self.input_sizes = [
             list(input_shape), 
@@ -609,7 +624,7 @@ class ConvNet4(nn.Module):
             ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, 
                                 kernel_size=5, padding=2)),
             ('maxpool1', nn.MaxPool2d(2)),
-            ('nonlin1', nonlin())
+            ('nonlin1', nonlin()),
         ])
 
         block2 = OrderedDict([
@@ -635,16 +650,38 @@ class ConvNet4(nn.Module):
         if not self.use_batchnorm:
             del block3['batchnorm1']
             del block4['batchnorm2']
+        if not self.separate_activations:
+            del block1['nonlin1']
+            del block2['nonlin2']
+            del block3['nonlin3']
 
-        self.all_modules = nn.Sequential(OrderedDict([
-            ('block1', nn.Sequential(block1)),
-            ('block2', nn.Sequential(block2)),
-            ('block3', nn.Sequential(block3)),
-            ('block4', nn.Sequential(block4))
-        ]))
+        if self.separate_activations:
+            self.all_modules = nn.Sequential(OrderedDict([
+                ('block1', nn.Sequential(block1)),
+                ('block2', nn.Sequential(block2)),
+                ('block3', nn.Sequential(block3)),
+                ('block4', nn.Sequential(block4)),
+            ]))
+        else:
+            self.all_modules = nn.ModuleList([
+                nn.Sequential(block1),
+                nn.Sequential(block2),
+                nn.Sequential(block3),
+                nn.Sequential(block4),
+            ])
+            self.all_activations = nn.ModuleList([nonlin(), nonlin(), nonlin()])
 
     def forward(self, x):
-        y = self.all_modules(x)
+        if self.separate_activations:
+            y = self.all_modules(x)
+        else:
+            for i, module in enumerate(self.all_modules):
+                if i == 0:
+                    y = module(x)
+                else:
+                    y = module(y)
+                if i != len(self.all_modules)-1:
+                    y = self.all_activations[i](y)
         return y
 
 
