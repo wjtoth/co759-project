@@ -451,14 +451,10 @@ class GeneticOptimizer(TargetPropOptimizer):
 
 
 def accuracy(prediction, target):
-    if type(target) == Variable:
-        target = target.data 
     return 100 * prediction.max(dim=1)[1].eq(target).float().mean().cpu()
 
 
 def accuracy_topk(prediction, target, k=5):
-    if type(target) == Variable:
-        target = target.data 
     _, predictions_top5 = torch.topk(prediction, k, dim=1, largest=True)
     return 100 * (predictions_top5 == target.unsqueeze(1)).max(
         dim=1)[0].float().mean().cpu()
@@ -488,10 +484,10 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 inputs, labels = inputs.cuda(), labels.cuda()
             if i % 10 == 1:
                 if train_per_layer:
-                    ouputs = model(inputs)
-                    loss = loss_function(ouputs, labels)
-                    accuracy = accuracy(outputs, labels)
-                    accuracy_top5 = accuracy_topk(outputs, labels, k=5)
+                    outputs = model(inputs)
+                    loss = loss_function(outputs, labels)
+                    batch_accuracy = accuracy(outputs, labels)
+                    batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5)
                 if i == 1:
                     steps = 1
                 else:
@@ -500,9 +496,9 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 print('training --- epoch: %d, batch: %d, loss: %.3f, acc: %.3f, '
                       'acc_top5: %.3f, steps/sec: %.2f' 
                       % (epoch+1, i+1, loss.data[0], steps/(current_time-last_time), 
-                         accuracy, accuracy_top5))
+                         batch_accuracy, batch_accuracy_top5))
                 last_time = current_time
-            train_step = epoch*len(dataset_loader) + i
+            train_step = epoch*len(train_dataset_loader) + i
             targets = labels
             if train_per_layer:
                 for j, (module, optimizer) in enumerate(modules):
@@ -538,17 +534,17 @@ def evaluate(model, dataset_loader, loss_function, log=True, use_gpu=True):
             inputs, labels = inputs.cuda(), labels.cuda()
         outputs = model(inputs)
         loss = loss_function(outputs, labels).data[0]
-        total_loss += loss*inputs.shape[0]
-        total_accuracy += accuracy(outputs, labels)*inputs.shape[0]
-        total_accuracy_top5 += accuracy_topk(outputs, labels, k=5)*inputs.shape[0]
+        total_loss += loss
+        total_accuracy += accuracy(outputs, labels)
+        total_accuracy_top5 += accuracy_topk(outputs, labels, k=5)
 
     loss = total_loss / len(dataset_loader)
-    accuracy = total_accuracy / len(dataset_loader)
-    accuracy_top5 = total_accuracy_top5 / len(dataset_loader)
+    total_accuracy = total_accuracy / len(dataset_loader)
+    total_accuracy_top5 = total_accuracy_top5 / len(dataset_loader)
     if log:
         print('\nevaluation --- loss: %.3f, acc: %.3f, acc_top5: %.3f \n' 
-              % (loss, accuracy, accuracy_top5))
-    return loss, accuracy, accuracy_top5
+              % (loss, total_accuracy, total_accuracy_top5))
+    return loss, total_accuracy, total_accuracy_top5
 
 
 def get_adversarial_dataset(dataset_name, terminal_args, size=2000):
