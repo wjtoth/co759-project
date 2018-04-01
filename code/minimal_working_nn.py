@@ -531,16 +531,16 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
 def evaluate(model, dataset_loader, loss_function, log=True, use_gpu=True):
     model.eval()
     total_loss, total_accuracy, total_accuracy_top5 = 0, 0, 0
-    for inputs, labels, _ in enumerate(dataset_loader):
+    for inputs, labels in dataset_loader:
         inputs = Variable(inputs, volatile=True)
         labels = Variable(labels, volatile=True)
         if use_gpu:
             inputs, labels = inputs.cuda(), labels.cuda()
         outputs = model(inputs)
         loss = loss_function(outputs, labels).data[0]
-        total_loss += loss*data.shape[0]
-        total_accuracy += accuracy(outputs, labels)
-        total_accuracy_top5 += accuracy_topk(outputs, labels, k=5)
+        total_loss += loss*inputs.shape[0]
+        total_accuracy += accuracy(outputs, labels)*inputs.shape[0]
+        total_accuracy_top5 += accuracy_topk(outputs, labels, k=5)*inputs.shape[0]
 
     loss = total_loss / len(dataset_loader)
     accuracy = total_accuracy / len(dataset_loader)
