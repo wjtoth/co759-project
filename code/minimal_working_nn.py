@@ -261,14 +261,15 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         candidate.mul_(2)
         candidate.add_(-1)
 
+        perturb_size = candidate.shape[1] // self.candidates
+
         # Local search to find candidates
         for k in range(0, self.iterations):
             # Flip tensor in chunks of rows to reduce number of loss evaluations
-            candidates = []
+            candidates = [candidate.clone()]
             for i in range(0, self.candidates):
-                perturb_size = candidate.shape[1] // self.candidates
                 candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
-                candidates.append(candidate)
+                candidates.append(candidate.clone())
                 candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
             candidate_losses = self.evaluate_targets(
                 module, loss_function, target, candidates)
