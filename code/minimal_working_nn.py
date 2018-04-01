@@ -475,8 +475,8 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
     else:
         optimizer = optimizer(model.parameters())
     for epoch in range(epochs):
-        last_time = time()
         evaluate(model, eval_dataset_loader, loss_function, log=True, use_gpu=use_gpu)
+        last_time = time()
         model.train()
         for i, (inputs, labels, _) in enumerate(train_dataset_loader):
             inputs, labels = Variable(inputs), Variable(labels)
