@@ -1,4 +1,5 @@
 # python
+import os
 import sys
 import argparse
 import numpy as np
@@ -125,7 +126,8 @@ def main():
         target_optimizer = None
 
     train(network, train_loader, val_loader, criterion, optimizer, 
-          args.epochs, target_optimizer=target_optimizer, use_gpu=args.cuda)
+          args.epochs, target_optimizer=target_optimizer, 
+          use_gpu=args.cuda, args=args)
     print('Finished training')
 
     if args.adv_eval:
@@ -477,7 +479,7 @@ def accuracy_topk(prediction, target, k=5):
 
 
 def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
-          optimizer, epochs, target_optimizer=None, use_gpu=True):
+          optimizer, epochs, target_optimizer=None, use_gpu=True, args=None):
     model.train()
     train_per_layer = target_optimizer is not None
     if train_per_layer:
@@ -490,10 +492,15 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             use_gpu=use_gpu)
     else:
         optimizer = optimizer(model.parameters())
+    training_metrics = {'dataset_batches': len(train_dataset_loader),
+                        'loss': [], 'accuracy': [], 
+                        'accuracy_top5': [], 'steps/sec': []}
+    eval_metrics = {'dataset_batches': len(eval_dataset_loader), 
+                    'loss': [], 'accuracy': [], 'accuracy_top5': []}
     for epoch in range(epochs):
         if epoch == 0:
-            evaluate(model, eval_dataset_loader, 
-                     loss_function, log=True, use_gpu=use_gpu)
+            evaluate(model, eval_dataset_loader, loss_function, 
+                     eval_metrics, log=True, use_gpu=use_gpu)
         last_time = time()
         model.train()
         for i, (inputs, labels, _) in enumerate(train_dataset_loader):
@@ -510,11 +517,16 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     steps = 1
                 else:
                     steps = 10
-                current_time = time() 
+                current_time = time()
+                steps_per_sec = steps/(current_time-last_time)
+                training_metrics['loss'].append(loss.data[0])
+                training_metrics['accuracy'].append(batch_accuracy)
+                training_metrics['accuracy_top5'].append(batch_accuracy_top5)
+                training_metrics['steps/sec'].append(steps_per_sec)
                 print('training --- epoch: %d, batch: %d, loss: %.3f, acc: %.3f, '
                       'acc_top5: %.3f, steps/sec: %.2f' 
                       % (epoch+1, i+1, loss.data[0], batch_accuracy, 
-                         batch_accuracy_top5, steps/(current_time-last_time)))
+                         batch_accuracy_top5, steps_per_sec))
                 last_time = current_time
                 model.train()
             train_step = epoch*len(train_dataset_loader) + i
@@ -554,10 +566,14 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     optimizer.zero_grad()
                     loss.backward()
                 optimizer.step()
-        evaluate(model, eval_dataset_loader, loss_function, log=True, use_gpu=use_gpu)
+        evaluate(model, eval_dataset_loader, loss_function, 
+                 eval_metrics, log=True, use_gpu=use_gpu)
+        store_checkpoint(model, optimizer, args, training_metrics, 
+                         eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
 
 
-def evaluate(model, dataset_loader, loss_function, log=True, use_gpu=True):
+def evaluate(model, dataset_loader, loss_function, 
+             eval_metrics_dict, log=True, use_gpu=True):
     model.eval()
     total_loss, total_accuracy, total_accuracy_top5 = 0, 0, 0
     for inputs, labels in dataset_loader:
@@ -577,6 +593,10 @@ def evaluate(model, dataset_loader, loss_function, log=True, use_gpu=True):
     if log:
         print('\nevaluation --- loss: %.3f, acc: %.3f, acc_top5: %.3f \n' 
               % (loss, total_accuracy, total_accuracy_top5))
+    eval_metrics_dict['loss'].append(loss)
+    eval_metrics_dict['accuracy'].append(total_accuracy)
+    eval_metrics_dict['accuracy_top5'].append(total_accuracy_top5)
+
     return loss, total_accuracy, total_accuracy_top5
 
 
@@ -584,7 +604,7 @@ def get_adversarial_dataset(dataset_name, terminal_args, size=2000):
     args = terminal_args
     adv_eval_loader, _, _, _ = create_datasets(
         dataset_name, 1, 1, not args.no_aug, args.no_val, args.data_root, 
-        args.cuda, args.seed, 1, args.dbg_ds_size, args.download)
+        args.cuda, args.seed, 0, args.dbg_ds_size, args.download)
     return [(image[0].numpy(), label.numpy()) 
             for image, label, _ in adv_eval_loader][:size]
 
@@ -602,7 +622,62 @@ def evaluate_adversarially(model, dataset, criterion, attack,
     return failure_rate
 
 
+def store_checkpoint(model, optimizer, terminal_args, training_metrics, 
+                     eval_metrics, epoch, root_log_dir):
+    if isinstance(model, ConvNet4):
+        network_type = 'convnet4'
+    else:
+        raise NotImplementedError
+    dataset_dir = os.path.join(root_log_dir, 'cifar10')
+    log_dir = os.path.join(dataset_dir, network_type + '-' + terminal_args.nonlin 
+        + '-bs' + str(terminal_args.batch) + '-' + terminal_args.loss)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    checkpoint_state = {
+        'args': terminal_args,
+        'model_state': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'training_metrics': training_metrics,
+        'eval_metrics': eval_metrics,
+        'epoch': epoch,
+        'save_time': time()
+    }
+    file_name = 'model_checkpoint_epoch{}.state'.format(epoch)
+    file_path = os.path.join(log_dir, file_name)
+    torch.save(checkpoint_state, file_path)
+    print('\nModel checkpoint saved at: ' 
+          + '\\'.join(file_path.split('\\')[-2:]) + '\n')
+    # delete old checkpoint
+    if epoch > 10:
+        previous = os.path.join(
+            log_dir, 'model_checkpoint_epoch{}.state'.format(epoch-10))
+        if os.path.exists(previous) and os.path.isfile(previous):
+            os.remove(previous)
+
+
+def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
+    if args is None and log_dir is None:
+        raise ValueError('Need at least one argument to locate the checkpoint.')
+    if args is not None:
+        log_dir = os.path.join(os.path.join(root_log_dir, 'cifar10'), 
+                               'convnet4-' + args.nonlin + '-bs' 
+                               + str(args.batch) + '-' + args.loss)
+    if epoch is None:
+        checkpoint_files = [file_name for file_name in os.listdir(log_dir)
+                            if file_name.startswith('model_checkpoint')]
+        checkpoint_files.sort()
+    else:
+        checkpoint_files = [
+            file_name for file_name in os.listdir(log_dir)
+            if file_name.startswith('model_checkpoint_epoch{}'.format(epoch))
+        ]
+
+    checkpoint_state = torch.load(checkpoint_files[-1])
+    return checkpoint_state
+
+
 class ConvNet4(nn.Module):
+
     def __init__(self, nonlin=nn.ReLU, use_batchnorm=False, 
                  input_shape=(3, 32, 32), separate_activations=True):
         super(ConvNet4, self).__init__()
