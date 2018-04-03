@@ -6,6 +6,7 @@ import numpy as np
 from functools import partial
 from time import time
 from random import randint
+from collections import OrderedDict
 
 # pytorch
 import torch
@@ -19,9 +20,9 @@ import torchvision.transforms as transforms
 
 # friesen and Domingos
 import losses
-from datasets import create_datasets
-from collections import OrderedDict
 import targetprop as tp
+from datasets import create_datasets
+from models.convnet8 import ConvNet8
 from util.reshapemodule import ReshapeBatch
 
 # ours
@@ -38,6 +39,8 @@ def main():
                         help='number of epochs to train for')
     parser.add_argument('--test-batch', type=int, default=0,
                         help='batch size to use for validation and testing')
+    parser.add_argument('--model', type=str, default='convnet4',
+                        choices=('convnet4', 'convnet8'))
     parser.add_argument('--nonlin', type=str, default='relu',
                         choices=('step01', 'step11', 'relu'))
     parser.add_argument('--loss', type=str, default='cross_entropy',
@@ -95,7 +98,10 @@ def main():
         nonlin = partial(Step, make01=False)
 
     print('Creating network...')
-    network = ConvNet4(nonlin=nonlin, separate_activations=not args.comb_opt)
+    if args.model == 'convnet4':
+        network = ConvNet4(nonlin=nonlin, separate_activations=args.comb_opt)
+    elif args.model == 'convnet8':
+        network = ConvNet8(nonlin=nonlin, separate_activations=args.comb_opt)
     network.needs_backward_twice = False
     if args.nonlin.startswith('step'):
         network.targetprop_rule = tp.TPRule.SoftHinge
@@ -654,12 +660,8 @@ def evaluate_adversarially(model, dataset, criterion, attack,
 
 def store_checkpoint(model, optimizer, terminal_args, training_metrics, 
                      eval_metrics, epoch, root_log_dir):
-    if isinstance(model, ConvNet4):
-        network_type = 'convnet4'
-    else:
-        raise NotImplementedError
     dataset_dir = os.path.join(root_log_dir, 'cifar10')
-    log_dir = os.path.join(dataset_dir, network_type + '-' + terminal_args.nonlin 
+    log_dir = os.path.join(dataset_dir, terminal_args.model + '-' + terminal_args.nonlin 
         + '-bs' + str(terminal_args.batch) + '-' + terminal_args.loss)
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -690,7 +692,7 @@ def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
         raise ValueError('Need at least one argument to locate the checkpoint.')
     if args is not None:
         log_dir = os.path.join(os.path.join(root_log_dir, 'cifar10'), 
-                               'convnet4-' + args.nonlin + '-bs' 
+                               args.model + '-' + args.nonlin + '-bs' 
                                + str(args.batch) + '-' + args.loss)
     if epoch is None:
         checkpoint_files = [file_name for file_name in os.listdir(log_dir)
@@ -710,7 +712,7 @@ class ConvNet4(nn.Module):
 
     def __init__(self, nonlin=nn.ReLU, use_batchnorm=False, 
                  input_shape=(3, 32, 32), separate_activations=True):
-        super(ConvNet4, self).__init__()
+        super().__init__()
         self.use_batchnorm = use_batchnorm
         self.conv1_size = 32
         self.conv2_size = 64
@@ -761,13 +763,6 @@ class ConvNet4(nn.Module):
             del block3['nonlin3']
 
         if self.separate_activations:
-            self.all_modules = nn.Sequential(OrderedDict([
-                ('block1', nn.Sequential(block1)),
-                ('block2', nn.Sequential(block2)),
-                ('block3', nn.Sequential(block3)),
-                ('block4', nn.Sequential(block4)),
-            ]))
-        else:
             self.all_modules = nn.ModuleList([
                 nn.Sequential(block1),
                 nn.Sequential(block2),
@@ -775,11 +770,16 @@ class ConvNet4(nn.Module):
                 nn.Sequential(block4),
             ])
             self.all_activations = nn.ModuleList([nonlin(), nonlin(), nonlin()])
+        else:
+            self.all_modules = nn.Sequential(OrderedDict([
+                ('block1', nn.Sequential(block1)),
+                ('block2', nn.Sequential(block2)),
+                ('block3', nn.Sequential(block3)),
+                ('block4', nn.Sequential(block4)),
+            ]))
 
     def forward(self, x):
         if self.separate_activations:
-            y = self.all_modules(x)
-        else:
             for i, module in enumerate(self.all_modules):
                 if i == 0:
                     y = module(x)
@@ -787,6 +787,8 @@ class ConvNet4(nn.Module):
                     y = module(y)
                 if i != len(self.all_modules)-1:
                     y = self.all_activations[i](y)
+        else:
+            y = self.all_modules(x)
         return y
 
 
