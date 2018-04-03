@@ -51,6 +51,8 @@ def main():
                              'are used for target setting')
     parser.add_argument('--comb-opt-method', type=str, default='local_search',
                         choices=('local_search', 'genetic'))
+    parser.add_argument('--dataset', type=str, default='cifar10',
+                        choices=('mnist', 'cifar10', 'cifar100', 'svhn', 'imagenet'))
     parser.add_argument('--data-root', type=str, default='',
                         help='root directory for imagenet dataset '
                              '(with separate train, val, test folders)')     
@@ -83,11 +85,11 @@ def main():
     args.cuda = args.cuda and torch.cuda.is_available()
     
     train_loader, val_loader, _, num_classes = \
-        create_datasets('cifar10', args.batch, args.test_batch, not args.no_aug, 
+        create_datasets(args.dataset, args.batch, args.test_batch, not args.no_aug, 
                         args.no_val, args.data_root, args.cuda, args.seed, 
                         args.nworkers, args.dbg_ds_size, args.download)
     if args.adv_eval:
-        adversarial_eval_dataset = get_adversarial_dataset('cifar10', args)
+        adversarial_eval_dataset = get_adversarial_dataset(args)
 
     args.nonlin = args.nonlin.lower()
     if args.nonlin == 'relu':
@@ -97,11 +99,24 @@ def main():
     elif args.nonlin == 'step11':
         nonlin = partial(Step, make01=False)
 
+    if args.dataset == 'mnist':
+        input_shape = (1, 28, 28)
+    elif args.dataset.startswith('cifar'):
+        input_shape = (3, 32, 32)
+    elif args.dataset == 'svhn':
+        input_shape = (3, 40, 40)
+    elif args.dataset == 'imagenet':
+        input_shape = (3, 224, 224)
+    else:
+        raise NotImplementedError('no other datasets currently supported')
+
     print('Creating network...')
     if args.model == 'convnet4':
-        network = ConvNet4(nonlin=nonlin, separate_activations=args.comb_opt)
+        network = ConvNet4(nonlin=nonlin, input_shape=input_shape, 
+                           separate_activations=args.comb_opt)
     elif args.model == 'convnet8':
-        network = ConvNet8(nonlin=nonlin, separate_activations=args.comb_opt)
+        network = ConvNet8(nonlin=nonlin, input_shape=input_shape, 
+                           separate_activations=args.comb_opt)
     network.needs_backward_twice = False
     if args.nonlin.startswith('step'):
         network.targetprop_rule = tp.TPRule.SoftHinge
@@ -502,14 +517,14 @@ def accuracy_topk(prediction, target, k=5):
 
 class Metrics(dict):
 
-     def __getitem__(self, key):
+    def __getitem__(self, key):
         if isinstance(key, int):
             item = {key: values[key] for metric, values in self.items()}
         else:
             item = super().__getitem__(key)
         return item
 
-    def append(metric_tuple):
+    def append(self, metric_tuple):
         for metric, value in metric_tuple:
             self[metric].append(value)
 
@@ -553,7 +568,7 @@ def train(model, train_dataset_loader, eval_dataset_loader,
                 if i == 1:
                     steps = 1
                 else:
-                    steps = 40
+                    steps = 10
                 current_time = time()
                 steps_per_sec = steps/(current_time-last_time)
                 metric_tuple = (('loss', loss.data[0]), ('accuracy', batch_accuracy), 
@@ -636,10 +651,10 @@ def evaluate(model, dataset_loader, loss_function,
     return loss, total_accuracy, total_accuracy_top5
 
 
-def get_adversarial_dataset(dataset_name, terminal_args, size=1000):
+def get_adversarial_dataset(terminal_args, size=1000):
     args = terminal_args
     adv_eval_loader, _, _, _ = create_datasets(
-        dataset_name, 1, 1, not args.no_aug, args.no_val, args.data_root, 
+        args.dataset, 1, 1, not args.no_aug, args.no_val, args.data_root, 
         args.cuda, args.seed, 0, args.dbg_ds_size, args.download)
     return [(image[0].numpy(), label.numpy()) 
             for image, label, _ in adv_eval_loader][:size]
@@ -660,7 +675,7 @@ def evaluate_adversarially(model, dataset, criterion, attack,
 
 def store_checkpoint(model, optimizer, terminal_args, training_metrics, 
                      eval_metrics, epoch, root_log_dir):
-    dataset_dir = os.path.join(root_log_dir, 'cifar10')
+    dataset_dir = os.path.join(root_log_dir, terminal_args.dataset)
     log_dir = os.path.join(dataset_dir, terminal_args.model + '-' + terminal_args.nonlin 
         + '-bs' + str(terminal_args.batch) + '-' + terminal_args.loss)
     if not os.path.exists(log_dir):
@@ -691,7 +706,7 @@ def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
     if args is None and log_dir is None:
         raise ValueError('Need at least one argument to locate the checkpoint.')
     if args is not None:
-        log_dir = os.path.join(os.path.join(root_log_dir, 'cifar10'), 
+        log_dir = os.path.join(os.path.join(root_log_dir, args.dataset), 
                                args.model + '-' + args.nonlin + '-bs' 
                                + str(args.batch) + '-' + args.loss)
     if epoch is None:
