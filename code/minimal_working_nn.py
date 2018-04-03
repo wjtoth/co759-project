@@ -42,6 +42,7 @@ def main():
                         choices=('step01', 'step11', 'relu'))
     parser.add_argument('--loss', type=str, default='cross_entropy',
                         choices=('cross_entropy', 'hinge'))
+    parser.add_argument('--wtdecay', type=float, default=0)
     parser.add_argument('--comb-opt', action='store_true', default=False,
                         help='if specified, combinatorial optimization methods ' 
                              'are used for target setting')
@@ -67,12 +68,13 @@ def main():
                         help='if specified, evaluates the network on ' 
                              'adversarial examples generated using adv-attack')
     parser.add_argument('--adv-attack', type=str, default='fgsm', 
-                        choices=tuple(adversarial.ATTACKS.keys()))
+                        choices=tuple(adversarial.ATTACKS.keys()) + ('all',))
     parser.add_argument('--adv-epsilon', type=float, default=0.25)
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='if specified, use CPU only')
     parser.add_argument('--seed', type=int, default=468412397,
                         help='random seed')
+    parser.add_argument('--no-train', action='store_true', default=False)
     
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
@@ -100,43 +102,57 @@ def main():
         network.needs_backward_twice = tp.needs_backward_twice(tp.TPRule.SoftHinge)
     if args.cuda:
         network = network.cuda()
-    
-    if args.loss == 'cross_entropy':
-        criterion = torch.nn.CrossEntropyLoss(
-            size_average=not args.comb_opt, reduce=not args.comb_opt)
-    elif args.loss == 'hinge':
-        criterion = partial(multiclass_hinge_loss, reduce_=not args.comb_opt)
-    optimizer = partial(optim.Adam, lr=0.001)
 
-    if args.comb_opt:
-        if args.nonlin != 'step11':
-            raise NotImplementedError(
-                "Discrete opt methods currently only support nonlin = step11.")
-        if args.comb_opt_method == 'local_search':
-            target_optimizer = partial(
-                LocalSearchOptimizer, batch_size=args.batch, 
-                candidates=10, iterations=10)
-        elif args.comb_opt_method == 'genetic':
-            target_optimizer = partial(
-                GeneticOptimizer, batch_size=args.batch, candidates=10, 
-                parents=5, generations=10, populations=1)
-        else:
-            raise NotImplementedError
+    if args.no_train:
+        print('Loading from last checkpoint...')
+        checkpoint_state = load_checkpoint(
+            os.path.join(os.curdir, 'new_logs'), args=args)
+        model_state = checkpoint_state['model_state']
+        network.load_state_dict(model_state)
     else:
-        target_optimizer = None
+        if args.loss == 'cross_entropy':
+            criterion = torch.nn.CrossEntropyLoss(
+                size_average=not args.comb_opt, reduce=not args.comb_opt)
+        elif args.loss == 'hinge':
+            criterion = partial(multiclass_hinge_loss, reduce_=not args.comb_opt)
+        optimizer = partial(optim.Adam, lr=0.00025, weight_decay=args.wtdecay)
+        if args.comb_opt:
+            if args.nonlin != 'step11':
+                raise NotImplementedError(
+                    "Discrete opt methods currently only support nonlin = step11.")
+            if args.comb_opt_method == 'local_search':
+                target_optimizer = partial(
+                    LocalSearchOptimizer, batch_size=args.batch, 
+                    candidates=10, iterations=10)
+            elif args.comb_opt_method == 'genetic':
+                target_optimizer = partial(
+                    GeneticOptimizer, batch_size=args.batch, candidates=10, 
+                    parents=5, generations=10, populations=1)
+            else:
+                raise NotImplementedError
+        else:
+            target_optimizer = None
 
-    train(network, train_loader, val_loader, criterion, optimizer, 
-          args.epochs, target_optimizer=target_optimizer, 
-          use_gpu=args.cuda, args=args)
-    print('Finished training')
+        train(network, train_loader, val_loader, criterion, optimizer, 
+              args.epochs, target_optimizer=target_optimizer, 
+              use_gpu=args.cuda, args=args, print_param_info=False)
+        print('Finished training')
 
     if args.adv_eval:
         print('Evaluating on adversarial examples...')
-        failure_rate = evaluate_adversarially(
-            network, adversarial_eval_dataset, 'untargeted_misclassify', 
-            args.adv_attack, args.test_batch, num_classes, 
-            args.adv_epsilon, args.cuda)
-        print('Failure rate: %0.2f%%' % (100*failure_rate))
+        if args.adv_attack == 'all':
+            for attack in adversarial.ATTACKS:
+                failure_rate = evaluate_adversarially(
+                    network, adversarial_eval_dataset, 'untargeted_misclassify', 
+                    attack, args.test_batch, num_classes, 
+                    args.adv_epsilon, args.cuda)
+                print('Failure rate: %0.2f%%' % (100*failure_rate))
+        else:
+            failure_rate = evaluate_adversarially(
+                network, adversarial_eval_dataset, 'untargeted_misclassify', 
+                args.adv_attack, args.test_batch, num_classes, 
+                args.adv_epsilon, args.cuda)
+            print('Failure rate: %0.2f%%' % (100*failure_rate))
 
 
 class TargetPropOptimizer:
@@ -478,8 +494,23 @@ def accuracy_topk(prediction, target, k=5):
         dim=1)[0].float().mean().cpu()
 
 
-def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
-          optimizer, epochs, target_optimizer=None, use_gpu=True, args=None):
+class Metrics(dict):
+
+     def __getitem__(self, key):
+        if isinstance(key, int):
+            item = {key: values[key] for metric, values in self.items()}
+        else:
+            item = super().__getitem__(key)
+        return item
+
+    def append(metric_tuple):
+        for metric, value in metric_tuple:
+            self[metric].append(value)
+
+
+def train(model, train_dataset_loader, eval_dataset_loader, 
+          loss_function, optimizer, epochs, target_optimizer=None, 
+          use_gpu=True, args=None, print_param_info=False):
     model.train()
     train_per_layer = target_optimizer is not None
     if train_per_layer:
@@ -492,11 +523,11 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             use_gpu=use_gpu)
     else:
         optimizer = optimizer(model.parameters())
-    training_metrics = {'dataset_batches': len(train_dataset_loader),
-                        'loss': [], 'accuracy': [], 
-                        'accuracy_top5': [], 'steps/sec': []}
-    eval_metrics = {'dataset_batches': len(eval_dataset_loader), 
-                    'loss': [], 'accuracy': [], 'accuracy_top5': []}
+    training_metrics = Metrics({'dataset_batches': len(train_dataset_loader),
+                                'loss': [], 'accuracy': [], 
+                                'accuracy_top5': [], 'steps/sec': []})
+    eval_metrics = Metrics({'dataset_batches': len(eval_dataset_loader), 
+                            'loss': [], 'accuracy': [], 'accuracy_top5': []})
     for epoch in range(epochs):
         if epoch == 0:
             evaluate(model, eval_dataset_loader, loss_function, 
@@ -516,13 +547,13 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 if i == 1:
                     steps = 1
                 else:
-                    steps = 10
+                    steps = 40
                 current_time = time()
                 steps_per_sec = steps/(current_time-last_time)
-                training_metrics['loss'].append(loss.data[0])
-                training_metrics['accuracy'].append(batch_accuracy)
-                training_metrics['accuracy_top5'].append(batch_accuracy_top5)
-                training_metrics['steps/sec'].append(steps_per_sec)
+                metric_tuple = (('loss', loss.data[0]), ('accuracy', batch_accuracy), 
+                                ('accuracy_top5', batch_accuracy_top5), 
+                                ('steps/sec', steps_per_sec))
+                training_metrics.append(metric_tuple)
                 print('training --- epoch: %d, batch: %d, loss: %.3f, acc: %.3f, '
                       'acc_top5: %.3f, steps/sec: %.2f' 
                       % (epoch+1, i+1, loss.data[0], batch_accuracy, 
@@ -544,7 +575,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         targets, loss = target_optimizer.step(
                             train_step, j, targets, label=labels)
                     loss.backward()
-                    if i % 100 == 1:
+                    if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
                             if k == 0:
@@ -573,7 +604,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
 
 
 def evaluate(model, dataset_loader, loss_function, 
-             eval_metrics_dict, log=True, use_gpu=True):
+             eval_metrics, log=True, use_gpu=True):
     model.eval()
     total_loss, total_accuracy, total_accuracy_top5 = 0, 0, 0
     for inputs, labels in dataset_loader:
@@ -593,14 +624,13 @@ def evaluate(model, dataset_loader, loss_function,
     if log:
         print('\nevaluation --- loss: %.3f, acc: %.3f, acc_top5: %.3f \n' 
               % (loss, total_accuracy, total_accuracy_top5))
-    eval_metrics_dict['loss'].append(loss)
-    eval_metrics_dict['accuracy'].append(total_accuracy)
-    eval_metrics_dict['accuracy_top5'].append(total_accuracy_top5)
+    eval_metrics.append((('loss', loss), ('accuracy', total_accuracy), 
+                         ('accuracy_top5', total_accuracy_top5)))
 
     return loss, total_accuracy, total_accuracy_top5
 
 
-def get_adversarial_dataset(dataset_name, terminal_args, size=2000):
+def get_adversarial_dataset(dataset_name, terminal_args, size=1000):
     args = terminal_args
     adv_eval_loader, _, _, _ = create_datasets(
         dataset_name, 1, 1, not args.no_aug, args.no_val, args.data_root, 
@@ -648,7 +678,7 @@ def store_checkpoint(model, optimizer, terminal_args, training_metrics,
     print('\nModel checkpoint saved at: ' 
           + '\\'.join(file_path.split('\\')[-2:]) + '\n')
     # delete old checkpoint
-    if epoch > 10:
+    if epoch > 9:
         previous = os.path.join(
             log_dir, 'model_checkpoint_epoch{}.state'.format(epoch-10))
         if os.path.exists(previous) and os.path.isfile(previous):
@@ -672,7 +702,7 @@ def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
             if file_name.startswith('model_checkpoint_epoch{}'.format(epoch))
         ]
 
-    checkpoint_state = torch.load(checkpoint_files[-1])
+    checkpoint_state = torch.load(os.path.join(log_dir, checkpoint_files[-1]))
     return checkpoint_state
 
 
