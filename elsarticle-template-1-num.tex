@@ -1,0 +1,132 @@
+\documentclass[a4paper]{article}
+
+\usepackage[english]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amsfonts, amssymb, amsthm}
+\usepackage{titlesec}
+\usepackage{graphicx, booktabs}
+\usepackage[colorinlistoftodos]{todonotes}
+\usepackage{verbatim, textcomp}
+\usepackage{algorithm, algorithmic}
+\bibliographystyle{plain}
+
+\titleformat{\section}{\large\scshape\center}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bf}{\thesubsection}{1em}{}
+
+\title{\scshape On the Training and Adversarial Resistance
+of Hard-Threshold Activation Networks}
+%Hard-Threshold Activation Networks: Their Training and Adversary Resistance
+
+\author{Leah Cousins, Daniel Oliveira, Lukas Nabergall, Justin Toth}
+
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+blah blah
+\end{abstract}
+
+
+\section{Introduction}
+\label{S:1}
+
+Neural networks were developed in the 1950s not long after artificial intelligence (AI) research began. Neural networks are computing systems made up of artificial neurons that are supposed to mimic the function of the neurons in the brain. However, given that the brain is the most complex organ in the body, modelling brain function in a neural network was a very ambitious thought at the time. As a result, early neural networks were extremely basic and came nowhere near simulating real biological neuron function. More specifically, early neural networks could only simulate a very limited number of neurons at once, which meant that they could not recognize complex patterns (e.g. images, languages and rules of a game). 
+ 
+In the last decade, Dr. Geoffrey Hinton from the University or Toronto, Dr. Yoshua Bengio from the University of Montreal, and many other researchers have made fundamental breakthroughs (e.g.,Hinton (2012); Bengio (2013); Bengio et. al (2014); Lee et.al (2015); Hubara et. al (2016)) in what we know today as \textit{deep neural networks}, ultimately leading to networks capable of human-level or near human-level performance on a variety of tasks, including image classification, speech recognition, machine translation, and playing video and board games. \\
+
+Deep neural networks are made up of many layers of artificial neurons that are ``hidden" between the input and output layers, which we call ``hidden layers". Each of these layers helps in learning different representations of input data, thus allowing the network to learn complex patterns. More specifically, starting from the input, each successive layer learns a more complex feature. In a deep neural network, each layer uses the output of the previous layer as input, so each layer learns from the previous one. As deep neural networks get deeper (more hidden layers) and wider (large amount of units per layer), the complexity of the network requires massive amounts of non-conventional computing power (e.g. GPUs) to train efficiently. This is problematic, as GPUs are not always readily available and are often prohibitively expensive. However, one way this problem can be solved is by network quantization. \\
+
+Quantized neural networks reduce computational complexity and enable low-precision inference by running with low-precision activations and/or weights and training with full complexity (Hubara et. al 2016). One way to reduce the complexity is to use a hard-threshold activation function on each unit. An example of such a function is the sign function. While most deep neural networks are trained by minimizing an error function using backpropagation via gradient descent, these techniques cannot be implemented when learning networks with hard-threshold activations because the derivative of such functions are zero everywhere and, typically, non-differentiable at the origin. As a result, another method to learn these networks must be used. \\ 
+
+We are interested in using a method called \emph{target propagation} to learn deep convolutional networks with hard-threshold activations. Target propagation involves computing target values for each unit at each layer, instead of computing gradients. Each feedforward unit's activation value is explicitly associated with a target value with the output value of each activation in the network, rather than a loss gradient. The weights at each layer are then updated locally in order to make the activation values closer to the targets. The target value is set to provide a smaller loss, which is why we want to optimize the weights in such a way that the activation values are as close to the targets as possible. Similar to gradient descent, target propagation is propagated backwards; by treating each layer (starting from the output layer) as an individual perceptron, we work backwards through the network to update the weights working with each layer separately. In general, we use the $(i+1)^{st}$ layer's targets to set the $i^{th}$ layer's targets and update the weights locally. \\
+
+The question we want to explore is how to set these target values at each layer. According to Friesen et al. (2017), setting the target values breaks down into a discrete optimization problem. Building off of Friesen et al. (2017)'s work, we are interested in developing efficient techniques for learning deep convolutional neural networks with hard-threshold units by implementing different discrete optimization heuristics. We develop two target propagation algorithms using two different combinatorial optimization heuristics  to train a deep convolutional neural network. The network we are working with is a 4-layer convolutional deep neural network. Our hard-threshold activation function is the standard sign function. We also develop a method of training using adversarial examples. 
+
+
+\section{Related work}
+\label{S:2}
+
+\subsection{Backpropagation for quantized networks}
+
+Using the conventional back-propagation algorithm via gradient descent to train a neural network, we compute the gradient of the loss with respect to the output of each layer : $$\partial h_{i-1}=\frac{\partial L}{\partial h_{i-1}}=\frac{\partial L}{\partial h_i}\frac{\partial h_i}{\partial h_{i-1}}=\partial h_i \frac{\partial h_i}{\partial h_{i-1}}$$ where $h_i$ is the output of layer $i$. This is propagated recursively from the output layer to the input layer using the chain rule. In our case $h_i=f_i(h_{i-1})=s_i(W_ih_{i-1})$ where $f_i$ is the feedforward mapping at layer $i$ and $s_i$ is the non-linearity at layer $i$. Thus, the non-linearity of $s_i$ does not allow us to use gradient descent. The most common method for learning deep hard-threshold neural networks using back-propagation is to use a gradient estimator, such as the straight-through estimator (STE). The STE was first proposed by Geoffrey Hinton in 2012, and later analyzed by Bengio in 2013. The idea is to replace the derivative of each hard-threshold unit with the identity function.\\
+
+\subsection{Target propagation}
+
+The idea of target propagation was first proposed in LeCun (1986), although he did not call it target propagation. Since then, Bengio (2014) proposed a method of target propagation called ``the vanilla target propogation" to avoid the chain of derivatives through the network by considering an ``approximate inverse" denoted by $g_i$ such that: $$f_i(g_i(\hat{h}_i)) \approx \hat{h}_i$$ where $\hat{h}_i$ is the target associated with $h_i$, and $\hat{h}_{i-1}=g_i(\hat{h}_i)$. We call $g_i$ the \emph{approximate inverse} of $f_i$, since $g_i$ need not invert all of $f_i$, only the neighbourhood of targets. Later in 2014, Lee et. al improved this method, claiming that ``the imperfection of the inverse yields severe optimization problems". This led to their improved method called ``difference target propagation", which is a linearly corrected formula of Bengio's (2014): $$\hat{h}_{i-1}-h_{i-1}=g(\hat{h}_i)-g_i(h_i)$$ In order to fix the problem, they require the following stability condition: $h_i = \hat{h}_i \rightarrow h_{i-1}=\hat{h}_{i-1}$. They claim that if this is not the case, then even though optimization will be terminated in the upper layers, the weights in the lower lays would continue to update. They showed that the output of each layer came closer to its target than Bengio's (2014) method. They also showed that this method of target propagation performs comparable to back-propagation methods. \\
+
+Hubara et. al (2016) introduce a method to train Quantized Neural Networks (QNNs) which they call Binarized Neural Networks (BNNs). The idea is to use only 1-bit per weight and activation, i.e. both weights and activations are constrained to either +1 or -1. They show that a binarized convolutional neural network (CNN) can reduce time complexity by 60\%. In our model, we can think of our activations to be binarized.\\ 
+
+Most recently, in 2017, Friesen et. al address that setting the targets for hard-threshold hidden units in order to minimize loss is in fact a discrete optimization problem. 
+
+\subsection{Adversarial robustness in neural networks}
+
+In 2014, Szegedy et al. discovered that deep neural classifiers are susceptible to misclassifying an otherwise correctly classified image by applying an imperceptible perturbation designed to maximize the classifier's prediction error (CITE). The existence of these \textit{adversarial examples} could lead to significant safety and security risks as DNNs gain increasing use in real-world settings. 
+
+
+\section{Training hard-threshold neural networks via target propagation}
+\label{S:3}
+
+
+
+
+\section{Discrete optimization for target setting}
+\label{S:4}
+
+
+\subsection{Random local search}
+
+
+\subsection{Genetic algorithms}
+
+
+
+
+\section{Experiments and results}
+\label{S:5}
+
+
+
+
+\section{Resistance to adversarial examples}
+\label{S:6}
+
+
+
+
+\section{Experiments and results}
+\label{S:7}
+
+\renewcommand{\arraystretch}{1.2}
+\begin{table}[H]
+\centering
+\caption{Error rates (in \%) on adversarial examples.}
+\begin{tabular}{@{}lrrrrrrrr@{}}
+ & & \multicolumn{4}{c}{Gradient-based} & \multicolumn{3}{c}{Score/Decision-based}  \\ 
+\cmidrule{3-6} \cmidrule{7-9}
+Model & Clean & FGSM & I-FGSM & DF & SM & Pixel & Search & Boundary  \\ \hline
+CNN4-ReLU & \textbf{17.42} & 89.90 & 89.86 & 90.8 & 90.8 & 91.00 & 62.89 & 90.5  \\ \hline
+CNN4-Step & 33.6 & \textbf{60.56} & \textbf{60.56} & \textbf{7.58} & \textbf{60.86} & \textbf{46.57} & \textbf{58.46} & \textbf{62.42}  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+
+\section{Conclusion}
+\label{S:8}
+
+
+Citations:
+\cite{hubara2016quantized}
+\cite{friesen2017deep}
+\cite{lee2015difference}
+\cite{bengio2014auto}
+\cite{bengio2013estimating}
+\cite{hinton2012neural}
+
+\bibliography{references}
+
+\end{document}
