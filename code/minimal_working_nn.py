@@ -18,8 +18,9 @@ import torchvision
 import torchvision.models as models
 import torchvision.transforms as transforms
 
-# friesen and Domingos
+# Friesen and Domingos
 import losses
+import activations
 import targetprop as tp
 from datasets import create_datasets
 from models.convnet8 import ConvNet8
@@ -33,24 +34,41 @@ def main():
     # argument definitions
     parser = argparse.ArgumentParser()
 
+    # model arguments
+    parser.add_argument('--model', type=str, default='convnet4',
+                        choices=('convnet4', 'convnet8'))
+    parser.add_argument('--nonlin', type=str, default='relu',
+                        choices=('relu', 'step01', 'step11', 'staircase'))
+
+    # training/optimization arguments
+    parser.add_argument('--no-train', action='store_true', default=False)
     parser.add_argument('--batch', type=int, default=64,
                         help='batch size to use for training')
     parser.add_argument('--epochs', type=int, default=10,
                         help='number of epochs to train for')
     parser.add_argument('--test-batch', type=int, default=0,
                         help='batch size to use for validation and testing')
-    parser.add_argument('--model', type=str, default='convnet4',
-                        choices=('convnet4', 'convnet8'))
-    parser.add_argument('--nonlin', type=str, default='relu',
-                        choices=('step01', 'step11', 'relu'))
     parser.add_argument('--loss', type=str, default='cross_entropy',
                         choices=('cross_entropy', 'hinge'))
     parser.add_argument('--wtdecay', type=float, default=0)
+    parser.add_argument('--lr-decay-factor', type=float, default=1.0,
+                        help='factor by which to multiply the learning rate ' 
+                             'at each value in <lr-decay-epochs>')
+    parser.add_argument('--lr-decay-epochs', type=int, nargs='+', default=None,
+                        help='list of epochs at which to multiply ' 
+                             'the learning rate by <lr-decay>')
+
+    # target propagation arguments
+    parser.add_argument('--grad-tp-rule', type=str, default='SoftHinge',
+                        choices=('WtHinge', 'TruncWtHinge', 'SoftHinge', 
+                                 'STE', 'SSTE', 'SSTEAndTruncWtHinge'))
     parser.add_argument('--comb-opt', action='store_true', default=False,
                         help='if specified, combinatorial optimization methods ' 
                              'are used for target setting')
     parser.add_argument('--comb-opt-method', type=str, default='local_search',
                         choices=('local_search', 'genetic'))
+
+    # data arguments
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=('mnist', 'cifar10', 'cifar100', 'svhn', 'imagenet'))
     parser.add_argument('--data-root', type=str, default='',
@@ -67,22 +85,27 @@ def main():
     parser.add_argument('--nworkers', type=int, default=2,
                         help='number of workers to use for loading data from disk')
     parser.add_argument('--no-val', action='store_true', default=False,
-                        help='if specified, do not create a validation set '
-                             'from the training data and use it to choose the best model')
+                        help='if specified, do not create a validation set from '
+                             'the training data and use it to choose the best model')
+
+    # adversarial evaluation arguments
     parser.add_argument('--adv-eval', action='store_true', default=False, 
                         help='if specified, evaluates the network on ' 
                              'adversarial examples generated using adv-attack')
     parser.add_argument('--adv-attack', type=str, default='fgsm', 
                         choices=tuple(adversarial.ATTACKS.keys()) + ('all',))
     parser.add_argument('--adv-epsilon', type=float, default=0.25)
+
+    # computation arguments
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='if specified, use CPU only')
     parser.add_argument('--seed', type=int, default=468412397,
                         help='random seed')
-    parser.add_argument('--no-train', action='store_true', default=False)
     
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
+    args.grad_tp_rule = tp.TPRule[args.grad_tp_rule]
+    args.lr_decay_epochs = [] if args.lr_decay_epochs is None else args.lr_decay_epochs
     
     train_loader, val_loader, _, num_classes = \
         create_datasets(args.dataset, args.batch, args.test_batch, not args.no_aug, 
@@ -95,9 +118,12 @@ def main():
     if args.nonlin == 'relu':
         nonlin = nn.ReLU
     elif args.nonlin == 'step01':
-        nonlin = partial(Step, make01=True)
+        nonlin = partial(Step, make01=True, targetprop_rule=args.grad_tp_rule)
     elif args.nonlin == 'step11':
-        nonlin = partial(Step, make01=False)
+        nonlin = partial(Step, make01=False, targetprop_rule=args.grad_tp_rule)
+    elif args.nonlin == 'staircase':
+        nonlin = partial(activations.Staircase, targetprop_rule=args.grad_tp_rule,
+                         nsteps=5, margin=1, trunc_thresh=2)
 
     if args.dataset == 'mnist':
         input_shape = (1, 28, 28)
@@ -118,9 +144,9 @@ def main():
         network = ConvNet8(nonlin=nonlin, input_shape=input_shape, 
                            separate_activations=args.comb_opt)
     network.needs_backward_twice = False
-    if args.nonlin.startswith('step'):
-        network.targetprop_rule = tp.TPRule.SoftHinge
-        network.needs_backward_twice = tp.needs_backward_twice(tp.TPRule.SoftHinge)
+    if args.nonlin.startswith('step') or args.nonlin == 'staircase':
+        network.targetprop_rule = args.grad_tp_rule
+        network.needs_backward_twice = tp.needs_backward_twice(args.grad_tp_rule)
     if args.cuda:
         network = network.cuda()
 
@@ -536,6 +562,9 @@ def train(model, train_dataset_loader, eval_dataset_loader,
     train_per_layer = target_optimizer is not None
     if train_per_layer:
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
+        lr_schedulers = [optim.lr_scheduler.MultiStepLR(optimizer, 
+                            args.lr_decay_epochs, gamma=args.lr_decay_factor)
+                         for optimizer in optimizers]
         modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
         target_optimizer = target_optimizer(
             modules=list(model.all_modules)[::-1],
@@ -544,12 +573,17 @@ def train(model, train_dataset_loader, eval_dataset_loader,
             use_gpu=use_gpu)
     else:
         optimizer = optimizer(model.parameters())
+        lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, args.lr_decay_epochs, 
+                                                      gamma=args.lr_decay_factor)
+        lr_schedulers = [lr_scheduler]
     training_metrics = Metrics({'dataset_batches': len(train_dataset_loader),
                                 'loss': [], 'accuracy': [], 
                                 'accuracy_top5': [], 'steps/sec': []})
     eval_metrics = Metrics({'dataset_batches': len(eval_dataset_loader), 
                             'loss': [], 'accuracy': [], 'accuracy_top5': []})
     for epoch in range(epochs):
+        for scheduler in lr_schedulers:
+            scheduler.step()
         if epoch == 0:
             evaluate(model, eval_dataset_loader, loss_function, 
                      eval_metrics, log=True, use_gpu=use_gpu)
