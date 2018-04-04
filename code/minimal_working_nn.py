@@ -1,12 +1,10 @@
 # python
-import os
 import sys
 import argparse
 import numpy as np
 from functools import partial
 from time import time
 from random import randint
-from collections import OrderedDict
 
 # pytorch
 import torch
@@ -18,12 +16,11 @@ import torchvision
 import torchvision.models as models
 import torchvision.transforms as transforms
 
-# Friesen and Domingos
+# friesen and Domingos
 import losses
-import activations
-import targetprop as tp
 from datasets import create_datasets
-from models.convnet8 import ConvNet8
+from collections import OrderedDict
+import targetprop as tp
 from util.reshapemodule import ReshapeBatch
 
 # ours
@@ -34,43 +31,21 @@ def main():
     # argument definitions
     parser = argparse.ArgumentParser()
 
-    # model arguments
-    parser.add_argument('--model', type=str, default='convnet4',
-                        choices=('convnet4', 'convnet8'))
-    parser.add_argument('--nonlin', type=str, default='relu',
-                        choices=('relu', 'step01', 'step11', 'staircase'))
-
-    # training/optimization arguments
-    parser.add_argument('--no-train', action='store_true', default=False)
     parser.add_argument('--batch', type=int, default=64,
                         help='batch size to use for training')
     parser.add_argument('--epochs', type=int, default=10,
                         help='number of epochs to train for')
     parser.add_argument('--test-batch', type=int, default=0,
                         help='batch size to use for validation and testing')
+    parser.add_argument('--nonlin', type=str, default='relu',
+                        choices=('step01', 'step11', 'relu'))
     parser.add_argument('--loss', type=str, default='cross_entropy',
                         choices=('cross_entropy', 'hinge'))
-    parser.add_argument('--wtdecay', type=float, default=0)
-    parser.add_argument('--lr-decay-factor', type=float, default=1.0,
-                        help='factor by which to multiply the learning rate ' 
-                             'at each value in <lr-decay-epochs>')
-    parser.add_argument('--lr-decay-epochs', type=int, nargs='+', default=None,
-                        help='list of epochs at which to multiply ' 
-                             'the learning rate by <lr-decay>')
-
-    # target propagation arguments
-    parser.add_argument('--grad-tp-rule', type=str, default='SoftHinge',
-                        choices=('WtHinge', 'TruncWtHinge', 'SoftHinge', 
-                                 'STE', 'SSTE', 'SSTEAndTruncWtHinge'))
     parser.add_argument('--comb-opt', action='store_true', default=False,
                         help='if specified, combinatorial optimization methods ' 
                              'are used for target setting')
     parser.add_argument('--comb-opt-method', type=str, default='local_search',
                         choices=('local_search', 'genetic'))
-
-    # data arguments
-    parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=('mnist', 'cifar10', 'cifar100', 'svhn', 'imagenet'))
     parser.add_argument('--data-root', type=str, default='',
                         help='root directory for imagenet dataset '
                              '(with separate train, val, test folders)')     
@@ -85,18 +60,14 @@ def main():
     parser.add_argument('--nworkers', type=int, default=2,
                         help='number of workers to use for loading data from disk')
     parser.add_argument('--no-val', action='store_true', default=False,
-                        help='if specified, do not create a validation set from '
-                             'the training data and use it to choose the best model')
-
-    # adversarial evaluation arguments
+                        help='if specified, do not create a validation set '
+                             'from the training data and use it to choose the best model')
     parser.add_argument('--adv-eval', action='store_true', default=False, 
                         help='if specified, evaluates the network on ' 
                              'adversarial examples generated using adv-attack')
     parser.add_argument('--adv-attack', type=str, default='fgsm', 
-                        choices=tuple(adversarial.ATTACKS.keys()) + ('all',))
+                        choices=tuple(adversarial.ATTACKS.keys()))
     parser.add_argument('--adv-epsilon', type=float, default=0.25)
-
-    # computation arguments
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='if specified, use CPU only')
     parser.add_argument('--seed', type=int, default=468412397,
@@ -104,102 +75,66 @@ def main():
     
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
-    args.grad_tp_rule = tp.TPRule[args.grad_tp_rule]
-    args.lr_decay_epochs = [] if args.lr_decay_epochs is None else args.lr_decay_epochs
     
     train_loader, val_loader, _, num_classes = \
-        create_datasets(args.dataset, args.batch, args.test_batch, not args.no_aug, 
+        create_datasets('cifar10', args.batch, args.test_batch, not args.no_aug, 
                         args.no_val, args.data_root, args.cuda, args.seed, 
                         args.nworkers, args.dbg_ds_size, args.download)
     if args.adv_eval:
-        adversarial_eval_dataset = get_adversarial_dataset(args)
+        adversarial_eval_dataset = get_adversarial_dataset('cifar10', args)
 
     args.nonlin = args.nonlin.lower()
     if args.nonlin == 'relu':
         nonlin = nn.ReLU
     elif args.nonlin == 'step01':
-        nonlin = partial(Step, make01=True, targetprop_rule=args.grad_tp_rule)
+        nonlin = partial(Step, make01=True)
     elif args.nonlin == 'step11':
-        nonlin = partial(Step, make01=False, targetprop_rule=args.grad_tp_rule)
-    elif args.nonlin == 'staircase':
-        nonlin = partial(activations.Staircase, targetprop_rule=args.grad_tp_rule,
-                         nsteps=5, margin=1, trunc_thresh=2)
-
-    if args.dataset == 'mnist':
-        input_shape = (1, 28, 28)
-    elif args.dataset.startswith('cifar'):
-        input_shape = (3, 32, 32)
-    elif args.dataset == 'svhn':
-        input_shape = (3, 40, 40)
-    elif args.dataset == 'imagenet':
-        input_shape = (3, 224, 224)
-    else:
-        raise NotImplementedError('no other datasets currently supported')
+        nonlin = partial(Step, make01=False)
 
     print('Creating network...')
-    if args.model == 'convnet4':
-        network = ConvNet4(nonlin=nonlin, input_shape=input_shape, 
-                           separate_activations=args.comb_opt)
-    elif args.model == 'convnet8':
-        network = ConvNet8(nonlin=nonlin, input_shape=input_shape, 
-                           separate_activations=args.comb_opt)
+    network = ConvNet4(nonlin=nonlin, separate_activations=not args.comb_opt)
     network.needs_backward_twice = False
-    if args.nonlin.startswith('step') or args.nonlin == 'staircase':
-        network.targetprop_rule = args.grad_tp_rule
-        network.needs_backward_twice = tp.needs_backward_twice(args.grad_tp_rule)
+    if args.nonlin.startswith('step'):
+        network.targetprop_rule = tp.TPRule.SoftHinge
+        network.needs_backward_twice = tp.needs_backward_twice(tp.TPRule.SoftHinge)
     if args.cuda:
         network = network.cuda()
+    
+    if args.loss == 'cross_entropy':
+        criterion = torch.nn.CrossEntropyLoss(
+            size_average=not args.comb_opt, reduce=not args.comb_opt)
+    elif args.loss == 'hinge':
+        criterion = partial(multiclass_hinge_loss, reduce_=not args.comb_opt)
+    optimizer = partial(optim.Adam, lr=0.001)
 
-    if args.no_train:
-        print('Loading from last checkpoint...')
-        checkpoint_state = load_checkpoint(
-            os.path.join(os.curdir, 'new_logs'), args=args)
-        model_state = checkpoint_state['model_state']
-        network.load_state_dict(model_state)
-    else:
-        if args.loss == 'cross_entropy':
-            criterion = torch.nn.CrossEntropyLoss(
-                size_average=not args.comb_opt, reduce=not args.comb_opt)
-        elif args.loss == 'hinge':
-            criterion = partial(multiclass_hinge_loss, reduce_=not args.comb_opt)
-        optimizer = partial(optim.Adam, lr=0.00025, weight_decay=args.wtdecay)
-        if args.comb_opt:
-            if args.nonlin != 'step11':
-                raise NotImplementedError(
-                    "Discrete opt methods currently only support nonlin = step11.")
-            if args.comb_opt_method == 'local_search':
-                target_optimizer = partial(
-                    LocalSearchOptimizer, batch_size=args.batch, 
-                    candidates=10, iterations=10)
-            elif args.comb_opt_method == 'genetic':
-                target_optimizer = partial(
-                    GeneticOptimizer, batch_size=args.batch, candidates=10, 
-                    parents=5, generations=10, populations=1)
-            else:
-                raise NotImplementedError
+    if args.comb_opt:
+        if args.nonlin != 'step11':
+            raise NotImplementedError(
+                "Discrete opt methods currently only support nonlin = step11.")
+        if args.comb_opt_method == 'local_search':
+            target_optimizer = partial(
+                LocalSearchOptimizer, batch_size=args.batch, 
+                candidates=10, iterations=10)
+        elif args.comb_opt_method == 'genetic':
+            target_optimizer = partial(
+                GeneticOptimizer, batch_size=args.batch, candidates=10, 
+                parents=5, generations=10, populations=1)
         else:
-            target_optimizer = None
+            raise NotImplementedError
+    else:
+        target_optimizer = None
 
-        train(network, train_loader, val_loader, criterion, optimizer, 
-              args.epochs, target_optimizer=target_optimizer, 
-              use_gpu=args.cuda, args=args, print_param_info=False)
-        print('Finished training')
+    train(network, train_loader, val_loader, criterion, optimizer, 
+          args.epochs, target_optimizer=target_optimizer, use_gpu=args.cuda)
+    print('Finished training')
 
     if args.adv_eval:
         print('Evaluating on adversarial examples...')
-        if args.adv_attack == 'all':
-            for attack in adversarial.ATTACKS:
-                failure_rate = evaluate_adversarially(
-                    network, adversarial_eval_dataset, 'untargeted_misclassify', 
-                    attack, args.test_batch, num_classes, 
-                    args.adv_epsilon, args.cuda)
-                print('Failure rate: %0.2f%%' % (100*failure_rate))
-        else:
-            failure_rate = evaluate_adversarially(
-                network, adversarial_eval_dataset, 'untargeted_misclassify', 
-                args.adv_attack, args.test_batch, num_classes, 
-                args.adv_epsilon, args.cuda)
-            print('Failure rate: %0.2f%%' % (100*failure_rate))
+        failure_rate = evaluate_adversarially(
+            network, adversarial_eval_dataset, 'untargeted_misclassify', 
+            args.adv_attack, args.test_batch, num_classes, 
+            args.adv_epsilon, args.cuda)
+        print('Failure rate: %0.2f%%' % (100*failure_rate))
 
 
 class TargetPropOptimizer:
@@ -541,30 +476,12 @@ def accuracy_topk(prediction, target, k=5):
         dim=1)[0].float().mean().cpu()
 
 
-class Metrics(dict):
-
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            item = {key: values[key] for metric, values in self.items()}
-        else:
-            item = super().__getitem__(key)
-        return item
-
-    def append(self, metric_tuple):
-        for metric, value in metric_tuple:
-            self[metric].append(value)
-
-
-def train(model, train_dataset_loader, eval_dataset_loader, 
-          loss_function, optimizer, epochs, target_optimizer=None, 
-          use_gpu=True, args=None, print_param_info=False):
+def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
+          optimizer, epochs, target_optimizer=None, use_gpu=True):
     model.train()
     train_per_layer = target_optimizer is not None
     if train_per_layer:
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
-        lr_schedulers = [optim.lr_scheduler.MultiStepLR(optimizer, 
-                            args.lr_decay_epochs, gamma=args.lr_decay_factor)
-                         for optimizer in optimizers]
         modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
         target_optimizer = target_optimizer(
             modules=list(model.all_modules)[::-1],
@@ -573,20 +490,10 @@ def train(model, train_dataset_loader, eval_dataset_loader,
             use_gpu=use_gpu)
     else:
         optimizer = optimizer(model.parameters())
-        lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, args.lr_decay_epochs, 
-                                                      gamma=args.lr_decay_factor)
-        lr_schedulers = [lr_scheduler]
-    training_metrics = Metrics({'dataset_batches': len(train_dataset_loader),
-                                'loss': [], 'accuracy': [], 
-                                'accuracy_top5': [], 'steps/sec': []})
-    eval_metrics = Metrics({'dataset_batches': len(eval_dataset_loader), 
-                            'loss': [], 'accuracy': [], 'accuracy_top5': []})
     for epoch in range(epochs):
-        for scheduler in lr_schedulers:
-            scheduler.step()
         if epoch == 0:
-            evaluate(model, eval_dataset_loader, loss_function, 
-                     eval_metrics, log=True, use_gpu=use_gpu)
+            evaluate(model, eval_dataset_loader, 
+                     loss_function, log=True, use_gpu=use_gpu)
         last_time = time()
         model.train()
         for i, (inputs, labels, _) in enumerate(train_dataset_loader):
@@ -603,16 +510,11 @@ def train(model, train_dataset_loader, eval_dataset_loader,
                     steps = 1
                 else:
                     steps = 10
-                current_time = time()
-                steps_per_sec = steps/(current_time-last_time)
-                metric_tuple = (('loss', loss.data[0]), ('accuracy', batch_accuracy), 
-                                ('accuracy_top5', batch_accuracy_top5), 
-                                ('steps/sec', steps_per_sec))
-                training_metrics.append(metric_tuple)
+                current_time = time() 
                 print('training --- epoch: %d, batch: %d, loss: %.3f, acc: %.3f, '
                       'acc_top5: %.3f, steps/sec: %.2f' 
                       % (epoch+1, i+1, loss.data[0], batch_accuracy, 
-                         batch_accuracy_top5, steps_per_sec))
+                         batch_accuracy_top5, steps/(current_time-last_time)))
                 last_time = current_time
                 model.train()
             train_step = epoch*len(train_dataset_loader) + i
@@ -630,7 +532,7 @@ def train(model, train_dataset_loader, eval_dataset_loader,
                         targets, loss = target_optimizer.step(
                             train_step, j, targets, label=labels)
                     loss.backward()
-                    if print_param_info and i % 100 == 1:
+                    if i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
                             if k == 0:
@@ -652,14 +554,10 @@ def train(model, train_dataset_loader, eval_dataset_loader,
                     optimizer.zero_grad()
                     loss.backward()
                 optimizer.step()
-        evaluate(model, eval_dataset_loader, loss_function, 
-                 eval_metrics, log=True, use_gpu=use_gpu)
-        store_checkpoint(model, optimizer, args, training_metrics, 
-                         eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
+        evaluate(model, eval_dataset_loader, loss_function, log=True, use_gpu=use_gpu)
 
 
-def evaluate(model, dataset_loader, loss_function, 
-             eval_metrics, log=True, use_gpu=True):
+def evaluate(model, dataset_loader, loss_function, log=True, use_gpu=True):
     model.eval()
     total_loss, total_accuracy, total_accuracy_top5 = 0, 0, 0
     for inputs, labels in dataset_loader:
@@ -679,17 +577,14 @@ def evaluate(model, dataset_loader, loss_function,
     if log:
         print('\nevaluation --- loss: %.3f, acc: %.3f, acc_top5: %.3f \n' 
               % (loss, total_accuracy, total_accuracy_top5))
-    eval_metrics.append((('loss', loss), ('accuracy', total_accuracy), 
-                         ('accuracy_top5', total_accuracy_top5)))
-
     return loss, total_accuracy, total_accuracy_top5
 
 
-def get_adversarial_dataset(terminal_args, size=1000):
+def get_adversarial_dataset(dataset_name, terminal_args, size=2000):
     args = terminal_args
     adv_eval_loader, _, _, _ = create_datasets(
-        args.dataset, 1, 1, not args.no_aug, args.no_val, args.data_root, 
-        args.cuda, args.seed, 0, args.dbg_ds_size, args.download)
+        dataset_name, 1, 1, not args.no_aug, args.no_val, args.data_root, 
+        args.cuda, args.seed, 1, args.dbg_ds_size, args.download)
     return [(image[0].numpy(), label.numpy()) 
             for image, label, _ in adv_eval_loader][:size]
 
@@ -707,101 +602,10 @@ def evaluate_adversarially(model, dataset, criterion, attack,
     return failure_rate
 
 
-def store_checkpoint(model, optimizer, terminal_args, training_metrics, 
-                     eval_metrics, epoch, root_log_dir):
-    dataset_dir = os.path.join(root_log_dir, terminal_args.dataset)
-    log_dir = os.path.join(dataset_dir, terminal_args.model + '-' + terminal_args.nonlin 
-        + '-bs' + str(terminal_args.batch) + '-' + terminal_args.loss)
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    checkpoint_state = {
-        'args': terminal_args,
-        'model_state': model.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        'training_metrics': training_metrics,
-        'eval_metrics': eval_metrics,
-        'epoch': epoch,
-        'save_time': time()
-    }
-    file_name = 'model_checkpoint_epoch{}.state'.format(epoch)
-    file_path = os.path.join(log_dir, file_name)
-    torch.save(checkpoint_state, file_path)
-    print('\nModel checkpoint saved at: ' 
-          + '\\'.join(file_path.split('\\')[-2:]) + '\n')
-    # delete old checkpoint
-    if epoch > 9:
-        previous = os.path.join(
-            log_dir, 'model_checkpoint_epoch{}.state'.format(epoch-10))
-        if os.path.exists(previous) and os.path.isfile(previous):
-            os.remove(previous)
-
-
-def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
-    if args is None and log_dir is None:
-        raise ValueError('Need at least one argument to locate the checkpoint.')
-    if args is not None:
-        log_dir = os.path.join(os.path.join(root_log_dir, args.dataset), 
-                               args.model + '-' + args.nonlin + '-bs' 
-                               + str(args.batch) + '-' + args.loss)
-    if epoch is None:
-        checkpoint_files = [file_name for file_name in os.listdir(log_dir)
-                            if file_name.startswith('model_checkpoint')]
-        checkpoint_files.sort()
-    else:
-        checkpoint_files = [
-            file_name for file_name in os.listdir(log_dir)
-            if file_name.startswith('model_checkpoint_epoch{}'.format(epoch))
-        ]
-
-    checkpoint_state = torch.load(os.path.join(log_dir, checkpoint_files[-1]))
-    return checkpoint_state
-
-
-class ToyNet(nn.Module):
-
-    def __init__(self, nonlin=nn.ReLU, input_shape=(1, 28, 28), 
-                 separate_activations=True):
-        super().__init__()
-        self.input_size = int(np.prod(input_shape))
-        self.fc1_size = 6
-
-        block1 = OrderedDict([
-            ('fc1', nn.Linear(self.input_size, self.fc1_size)), 
-            ('nonlin1', nonlin()),
-        ])
-        block2 = OrderedDict([
-            ('fc2', nn.Linear(self.fc1_size, 2)),
-        ])
-
-        if self.separate_activations:
-            self.all_modules = nn.ModuleList(
-                [nn.Sequential(block1), nn.Sequential(block2)])
-            self.all_activations = nn.ModuleList([nonlin(),])
-        else:
-            self.all_modules = nn.Sequential(OrderedDict([
-                ('block1', nn.Sequential(block1)),
-                ('block2', nn.Sequential(block2)),
-            ]))
-
-    def forward(x):
-        if self.separate_activations:
-            for i, module in enumerate(self.all_modules):
-                if i == 0:
-                    y = module(x)
-                else:
-                    y = module(y)
-                if i != len(self.all_modules)-1:
-                    y = self.all_activations[i](y)
-        else:
-            y = self.all_modules(x)
-        return y
-
-
 class ConvNet4(nn.Module):
-
     def __init__(self, nonlin=nn.ReLU, use_batchnorm=False, 
                  input_shape=(3, 32, 32), separate_activations=True):
-        super().__init__()
+        super(ConvNet4, self).__init__()
         self.use_batchnorm = use_batchnorm
         self.conv1_size = 32
         self.conv2_size = 64
@@ -852,6 +656,13 @@ class ConvNet4(nn.Module):
             del block3['nonlin3']
 
         if self.separate_activations:
+            self.all_modules = nn.Sequential(OrderedDict([
+                ('block1', nn.Sequential(block1)),
+                ('block2', nn.Sequential(block2)),
+                ('block3', nn.Sequential(block3)),
+                ('block4', nn.Sequential(block4)),
+            ]))
+        else:
             self.all_modules = nn.ModuleList([
                 nn.Sequential(block1),
                 nn.Sequential(block2),
@@ -859,16 +670,11 @@ class ConvNet4(nn.Module):
                 nn.Sequential(block4),
             ])
             self.all_activations = nn.ModuleList([nonlin(), nonlin(), nonlin()])
-        else:
-            self.all_modules = nn.Sequential(OrderedDict([
-                ('block1', nn.Sequential(block1)),
-                ('block2', nn.Sequential(block2)),
-                ('block3', nn.Sequential(block3)),
-                ('block4', nn.Sequential(block4)),
-            ]))
 
     def forward(self, x):
         if self.separate_activations:
+            y = self.all_modules(x)
+        else:
             for i, module in enumerate(self.all_modules):
                 if i == 0:
                     y = module(x)
@@ -876,8 +682,6 @@ class ConvNet4(nn.Module):
                     y = module(y)
                 if i != len(self.all_modules)-1:
                     y = self.all_activations[i](y)
-        else:
-            y = self.all_modules(x)
         return y
 
 
