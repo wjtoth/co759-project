@@ -25,3 +25,5 @@ code/data/
 code/logs/
 code/models/
 code/util/
+data/
+*.tar.gz
