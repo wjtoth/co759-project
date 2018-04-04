@@ -757,6 +757,46 @@ def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
     return checkpoint_state
 
 
+class ToyNet(nn.Module):
+
+    def __init__(self, nonlin=nn.ReLU, input_shape=(1, 28, 28), 
+                 separate_activations=True):
+        super().__init__()
+        self.input_size = int(np.prod(input_shape))
+        self.fc1_size = 6
+
+        block1 = OrderedDict([
+            ('fc1', nn.Linear(self.input_size, self.fc1_size)), 
+            ('nonlin1', nonlin()),
+        ])
+        block2 = OrderedDict([
+            ('fc2', nn.Linear(self.fc1_size, 2)),
+        ])
+
+        if self.separate_activations:
+            self.all_modules = nn.ModuleList(
+                [nn.Sequential(block1), nn.Sequential(block2)])
+            self.all_activations = nn.ModuleList([nonlin(),])
+        else:
+            self.all_modules = nn.Sequential(OrderedDict([
+                ('block1', nn.Sequential(block1)),
+                ('block2', nn.Sequential(block2)),
+            ]))
+
+    def forward(x):
+        if self.separate_activations:
+            for i, module in enumerate(self.all_modules):
+                if i == 0:
+                    y = module(x)
+                else:
+                    y = module(y)
+                if i != len(self.all_modules)-1:
+                    y = self.all_activations[i](y)
+        else:
+            y = self.all_modules(x)
+        return y
+
+
 class ConvNet4(nn.Module):
 
     def __init__(self, nonlin=nn.ReLU, use_batchnorm=False, 
