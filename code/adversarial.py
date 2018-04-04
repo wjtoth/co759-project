@@ -67,6 +67,8 @@ def adversarial_eval(foolbox_model, adversarial_dataset,
                      batch_size=64, target_class=None, 
                      against_labels=False):
     failures = []
+    adv_count = len([example for example in adversarial_dataset 
+                     if example is not None])
     for i in range(len(adversarial_dataset) // batch_size):
         examples = adversarial_dataset[i*batch_size:(i+1)*batch_size]
         # Misclassified input counts as failure
@@ -107,6 +109,5 @@ def adversarial_eval(foolbox_model, adversarial_dataset,
             raise ValueError("Unsupported criterion!")
 
     print("Failures:", failures.count(True))
-    print("Adversarial examples:", 
-          (batch_size * (len(adversarial_dataset)//batch_size)))
-    return failures.count(True) / (batch_size * (len(adversarial_dataset)//batch_size))
+    print("Adversarial examples:", adv_count)
+    return failures.count(True) / adv_count
