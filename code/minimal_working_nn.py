@@ -759,10 +759,10 @@ def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
 
 class ToyNet(nn.Module):
 
-    def __init__(self, nonlin=nn.ReLU, input_shape=(1, 28, 28), 
+    def __init__(self, nonlin=nn.ReLU, input_shape=(784,), 
                  separate_activations=True):
         super().__init__()
-        self.input_size = int(np.prod(input_shape))
+        self.input_size = input_shape[0]
         self.fc1_size = 6
 
         block1 = OrderedDict([
