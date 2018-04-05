@@ -54,7 +54,7 @@ def generate_adversarial_examples(model, attack, dataset, criterion,
     for image, label in dataset:
         adversarial_input = attack(image, int(label), **attack_kwargs)
         if adversarial_input is None:
-            # Misclassified input
+            # Misclassified input or adversarial example not found
             examples.append(None)
         else:
             examples.append((adversarial_input, image, label))
@@ -71,8 +71,7 @@ def adversarial_eval(foolbox_model, adversarial_dataset,
                      if example is not None])
     for i in range(len(adversarial_dataset) // batch_size):
         examples = adversarial_dataset[i*batch_size:(i+1)*batch_size]
-        # Misclassified input counts as failure
-        # failures.extend([True]*examples.count(None))
+        # Misclassified inputs / attack failures are ignored
         examples = [example for example in examples if example is not None]
         if not examples:
             continue
