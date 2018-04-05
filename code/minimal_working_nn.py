@@ -183,7 +183,7 @@ def main():
         train(network, train_loader, val_loader, criterion, optimizer, 
               args.epochs, target_optimizer=target_optimizer, 
               use_gpu=args.cuda, args=args, print_param_info=False)
-        print('Finished training')
+        print('Finished training\n')
 
     if args.adv_eval:
         print('Evaluating on adversarial examples...')
@@ -774,6 +774,7 @@ class ToyNet(nn.Module):
         ])
 
         if self.separate_activations:
+            del block1['nonlin1']
             self.all_modules = nn.ModuleList(
                 [nn.Sequential(block1), nn.Sequential(block2)])
             self.all_activations = nn.ModuleList([nonlin(),])
@@ -846,7 +847,7 @@ class ConvNet4(nn.Module):
         if not self.use_batchnorm:
             del block3['batchnorm1']
             del block4['batchnorm2']
-        if not self.separate_activations:
+        if self.separate_activations:
             del block1['nonlin1']
             del block2['nonlin2']
             del block3['nonlin3']
