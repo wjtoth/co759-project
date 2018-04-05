@@ -1,0 +1,175 @@
+\section{Training via Target Propagation} 
+
+\subsection{Training Hard-Threshold Deep Neural Networks}
+\paragraph{}
+We begin by formalizing what we mean when we think of a \emph{neural network}. An $\ell$-layered deep neural network $f$ is defined by $\ell$ activation functions $g^1, \dots, g^\ell$ and $\ell$ weight matrices $W^1,\dots, W^\ell$ such that
+$$f = g^\ell \circ W^\ell \circ g^{\ell-1} \dots W^2 \circ g^1 \circ W^1.$$
+Let $g: \R^n\rightarrow \R^n$ be the \emph{sign} function defined by
+$$g(x)_i = \begin{cases}
+	1, &\text{if $x_i \geq 0$} \\
+	-1, &\text{otherwise}.
+\end{cases}
+$$
+Then a \emph{hard-threshold deep neural network} is a deep neural network where each $g^i$ is a sign function of the same form as $g$, with the appropriate dimensions so that $g^i \circ W^i$ is defined. 
+\paragraph{}
+By changing the activations we can obtain different classes of neural networks. For instance, a common choice in the deep learning literature is to take Rectified Linear Units (ReLU) for activation functions. In this manner one would obtain what we call a ReLU deep neural network.
+\paragraph{}
+Given a particular hard-threshold neural network architecture i.e. a number of layers $\ell$ and dimensions for matrices $W^1, \dots, W^\ell$, and a size $m$ dataset $D = \{(x^i, t^i): i =1,\dots, m\}$ of input-output pairs, the task of \emph{training} our network $f$ is to choose values for the entries of $W^1, \dots, W^\ell$ so that $f$ evaluated on dataset inputs is as close as possible to the outputs. More precisely, for some loss function $L$ (a distance metric), we want to choose entries of $W^1, \dots, W^\ell$ so that
+$$L([f(x^1)\dots f(x^m)], [t^1\dots t^m])$$
+is minimized.
+\paragraph{}
+A $1$-layer hard-threshold neural network where $W^1 \in \R^{1\times m}$ and hence the network outputs either $1$ or $-1$, is called a \emph{perceptron}. Training such a network to $0$ loss is simply the problem of finding a separating hyperplane which separates the inputs $\{(x,1) \in D\}$ from $\{(x,-1) \in D\}$. If instead $W^1 \in \R^{n\times m}$ then our $1$-layer network decomposes into $n$ perceptrons, one for each row of $W^1$. Such a network is easy to train with the well-known \emph{perceptron algorithm}\cite{rosenblatt1958perceptron}\cite{novikoff1963convergence}.
+\paragraph{}
+Consider an assignment of matrices $T^0, \dots, T^\ell$ where $$T^i \in \{\pm 1\}^{\text{rows}(W^i)\times m}$$ for $i =1\dots \ell$, and 
+$$T^0 = \begin{bmatrix}
+x^1 & \dots & x^m
+\end{bmatrix}\quad\text{and}\quad T^\ell = \begin{bmatrix}
+t^1 & \dots & t^m
+\end{bmatrix}$$
+Then an $\ell$-layer hard-threshold neural network decomposes into $\ell$ single-layer neural networks. Layer $i$ is a $1$-layer neural network with weight matrix $W^i$ and with hypothetical input-output pairs of data corresponding to the columns of $T^{i-1}$ and $T^i$ respectively for layer $i$. This observation admits a potential idea for training hard-threshold networks. That is, to set hypothetical targets $T^0, \dots, T^\ell$ for each layer of our network then use the perceptron algorithm to train each layer independently as a $1$-layer neural network. Clearly if we could choose the hypothetical targets so well that each layer can be trained to $0$ loss then altogether we have trained the $\ell$-layer network to $0$ loss.
+\paragraph{}
+Unfortunately we meet two barriers. Firstly it is not clear that such an assignment of $T^0, \dots, T^\ell$ is always feasible, and secondly designing an algorithm to find such targets would be a highly non-trivial task. Nevertheless the ideas presented above motivate our chosen training heuristic, to be presented in the sequel.
+\subsection{Target Propagation Method}
+
+\paragraph{}
+Our target setting heuristic, called target propagation since it is evocative of the backpropagation techniques ubiquitous in deep learning, forgoes the idea of finding a perfect set of hypothetical targets.  We will present the high-level description of the method, discuss its merits, and then delve deeper into the specifics of its specification.
+\paragraph{}
+Start by initializing the weights $W^1, \dots, W^\ell$ randomly. Set $T^0 = \begin{bmatrix}
+x^1 & \dots & x^m
+\end{bmatrix}$ and $T^\ell = \begin{bmatrix}
+t^1 & \dots & t^m
+\end{bmatrix}$. Break the data into batches. Then for each batch and for each layer $i$ from $\ell$ to $2$ do the following: 
+\begin{enumerate}
+	\item Generate some candidate target matrices for layer $i$'s input, i.e. choices for $T^i-1$
+	\item Apply $W^i$ to each candidate target $T$ to get output-$T$
+	\item Compute $L(g^i(\text{output-}T), T^i)$ for each $T$.
+	\item Choose the candidate target $T$ which minimizes loss in the previous step.
+	\item Set $T^{i-1} = T$ and apply a step of gradient descent with respect to $L$ to update $W^i$.
+\end{enumerate}
+It should be clear that this form of training is nowhere near as powerful as asking for a target assignment such that each layer can be fully separated, but in deep learning there are merits to this. We are not only concerned with properly classifying the given dataset, but also with the network's ability to generalize to unseen examples. By intentionally weakening our method we can gain some generalization ability by avoiding the possibility of over-fitting to our training data. Furthermore by applying standard mini-batch techniques \cite{lecun1998efficient, keskar2016large} we can further make gains in our generalization potential, as well as admit more efficient use of computational resources. The reason we only apply a step of gradient descent in step $5$ instead of running the full perceptron algorithm, is the desire to avoid ``over-committing" to our current choice of targets $T^{i-1}$ that is subject to change in later batches, but to still propagate some information about this choice forward through the weights $W^i$.
+
+In Algorithm $1$ we present target propagation method in fully specificity.
+
+\begin{algorithm}
+\caption{Mini-Batch Target Propagation Method. Given a dataset $D$ of input-output pairs, a convex loss function $L$, and a desired network architecture for an $\ell$-layer deep neural network with hard-threshold activation unit $g^1,\dots, g^\ell$, computes weights $W^1, \dots, W^\ell$.}
+\begin{algorithmic}
+\STATE Partition $D$ into batches $D_1, \dots D_k$ each of size $s$. Default value of $s$ is $64$. 
+\STATE Initialize the weights $W^1, \dots, W^\ell$ randomly.
+\FOR{each batch $D_j$ of training examples}
+\STATE  Set $T^0 = \begin{bmatrix} x^1 & \dots & x^m \end{bmatrix}$ and $T^\ell = \begin{bmatrix} t^1 & \dots & t^m \end{bmatrix}$
+where $(x^i,t^i)$'s are input-output pairs of batch $D_j$.
+\FOR{each layer $i$ from $\ell$ to $1$}
+\IF{$i == 1$}
+\STATE Run a step of gradient descent on the perceptron associated to this layer based on $L(T^0, T^1)$.
+\ENDIF
+\STATE Generate a family of candidate target matrices $\cT$, each of dimension $\text{rows}(W^{i-1})\times s$, using a target generation heuristic.
+\FOR{each candidate target $T \in \cT$}
+\STATE Compute $L_T = L(g^i(W^iT), T^i)$
+\ENDFOR
+\STATE Choose the targets $T\in \cT$ which minimizes $L_T$. Set $T^{i-1} = T$
+\STATE Run a step of gradient descent to improve $W^i$ based on $L(W^iT^{i-1}, T^i)$.
+\ENDFOR
+\ENDFOR
+\end{algorithmic}
+\end{algorithm} 
+
+We call Algorithm $1$ a method since there involve a few choices to make on the users part before it becomes a fully precise algorithm. One is the choice of loss function. In fact, one could choose a distinct loss function for each layer if they so desired.
+
+Another, more critical choice, is that of the \emph{target generation heuristic}. By which we mean the manner in a family of candidates is proposed for loss evaluation. Two main classes of target generation heuristics were considered in our work: those based on combinatorial search, and those based rounding a continuous function. The following subsections discuss these two families and their members we investigated.
+
+\subsection{Combinatorial Heuristics}
+\paragraph{}
+In our work, we implemented two combinatorial heuristics for target setting: local search and genetic search. Both search types start with a set of random target settings.
+\paragraph{}
+Our local search heuristic starts with a random target setting $T$ and proceeds to evaluate the improvement of the layer loss by multiplying an entry in $T$ by $-1$. It keeps the best possible such local improvement over all entries and iterates. If we allowed this algorithm an indefinite number of iterations it could reach a local minimum of the layer loss function.
+\paragraph{}
+The genetic search heuristic operates in analogy with biological evolution. It maintains a population of candidate targets. At each iteration it ``breeds" pairs of members in the population via a crossover operation. The crossover operation slices two existing target settings at a random position and recombine them into a new solution. It then drops some poorest performing, in terms of the layer loss function, fraction of the population targets to maintain a constant population size. 
+\paragraph{}
+Algorithms $2$ describes how to implement one step of Local Search. A user of this heuristic can iteratively apply the following procedure as many times as desired until a local optimum is reached. Algorithm $3$ describes our implementation of Genetic Search. Notice this heuristic returns a population of target candidates for Algorithm $1$ to evaluate.
+\begin{algorithm}
+\caption{Local Search Target Generation Heuristic}
+\begin{algorithmic}
+\REQUIRE Initial (possibly random) Target Setting $T$, layer weights $W^i$, hard-threshold activation $g$, loss function $L$, Output targets $T^{i+1}$, 
+\STATE Let $L_T = L(g(W^iT), T^{i+1})$ store the best known loss so far.
+\STATE Let $(i^*,j^*) = \emptyset$ store the best entry of $T$ to flip.
+\FOR{ each entry $T_{ij}$ of $T$}
+\STATE $T_{ij} = (-1)T_{ij}$
+\IF{$L(g(W^iT), T^{i+1}) < L_T$} 
+\STATE{$L+T = L(g(W^iT), T^{i+1})$}
+\STATE $(i^*,j^*) = (i,j)$
+\ENDIF
+\STATE $T_{ij} = (-1)T_{ij}$, to revert the flip.
+\ENDFOR
+\IF{$(i^*,j^*) \neq \emptyset$}
+\STATE $T_{i^*j^*} = (-1)T_{i^*j^*}$ Apply the best flip.
+\ENDIF
+\RETURN{$T$}
+\end{algorithmic}
+\end{algorithm} 
+
+\begin{algorithm}
+\caption{Genetic Search Target Generation Heuristic}
+\begin{algorithmic}
+\REQUIRE initial target setting population $P$, network architecture, loss function $L$, labels $T^{i+1}$, nGenerations, nPopulation, nCrossover
+\STATE{Let $n$ := size of the 1st dimension of $T \in P$}
+\FOR{$i=1$ to nGenerations}
+\FOR{$i=1$ to nCrossover}
+\STATE{Let $T^1, T^2$ be two random target settings in $P[1:nPopulation]$}
+\STATE{$x$ = random between 1 and $n$} \COMMENT{determine slicing position}
+\STATE{Let $C$ be a new empty target setting}
+\STATE{$C[1:x] = T^1[1:x]$} \COMMENT{assigns a portion of $P_1$ to $C$}
+\STATE{$C[x+1:n] = T^2[x+1:n]$}  \COMMENT{assigns the complementing portion of $P_2$ to $C$}
+\STATE{Append $C$ to $P$}
+\ENDFOR
+\STATE{Filter out the worst losses, keeping only nPopulation candidate targets in $P$}
+\ENDFOR
+\RETURN{$P$}
+\end{algorithmic}
+\end{algorithm} 
+
+\paragraph{Further Approaches}
+Beyond the methods discussed above, there are a myriad of potential other approaches to explore. For instance, we could make use of the approach of simulated annealing search \cite{kirkpatrick1983optimization}, another widely used heuristic in discrete optimization. Perhaps even more powerful methods are worth consideration. For example one can model our target setting as an integer programming problem with a convex objective function:
+\begin{align*}
+\min\ &L(W^iT, T^i)\\
+\text{s.t. } &T \in \{-1,1\}^{\text{columns}(W^i)\times s}
+\end{align*}
+to be solved using a commercial integer convex program solver. Leading in to the Continuous Heuristics section to follow, one could try relaxing the integrality constraints, solving the convex programming relaxation and applying a rounding scheme to obtain a feasible target. All these higher-powered methods are open to explore, but would appear to come with a trade-off in that they are much more expensive than basic search and it's not clear if the target candidates they generate will be sufficiently better to warrant the rapid increase in training time.
+
+\paragraph{Experimental Results}
+We tested Algorithm $1$ using both local search and genetic search (Algorithms $2$ and $3$ respectively) with a mean squared error loss at each layer, except the last where we used the cross-entropy loss, and batch size $s=64$ on the following $4$-layer convolutional hard-threshold deep neural network: 
+\begin{figure}[H]
+\caption{\textbf{$4$-layer convnet}}
+\begin{center}
+	\begin{small}
+		Input: 32x32x3 image\\
+		$\downarrow$ \\
+		Convolutional Layer 1: size 32x3x5 \\
+		$\downarrow$\\
+		Pooling Layer \\
+		$\downarrow$ \\
+		Convolutional Layer 2: size 32x64x5\\
+		$\downarrow$\\
+		Pooling Layer\\
+		$\downarrow$ \\
+		Fully-connected Layer 1: size 64x1024\\
+		$\downarrow$ \\
+		Fully-connected Layer 2: size 1024x10\\
+		$\downarrow$\\
+		Output: size 10 vector
+	\end{small}
+\end{center}
+\end{figure}
+Note that our hard-threshold activation units appear after the pooling Layers and fully-connected layers. We drew our labeled images from the CIFAR-$10$ dataset. For further specifics on the network architecture see Appendix $B$ of Friesen and Domingos\cite{friesen2017deep}. We chose to use a similar architecture since our hypothesis was that combinatorial search heuristics would do at least as well as their gradient heuristic (to be discussed in the following subsection). While we did manage to achieve a comparable loss to their training approach, the accuracy of our network on unseen examples was surprisingly poor: achieving an accuracy of approximately $10\%$. This accuracy is only as good as guessing since we are trying to classify the input image in one of $10$ classes. This is a strange phenomenon to observe, and we can hardly even speculate at this point as to why it is happening. We comment though that while this evidence does not support our hypothesis it is hardly sufficient to rule out search methods completely. In future work we plan to explore our approach on a deeper level, by testing search methods with different network architectures, loss functions, and search parameters. At this point we see no theoretical justification for why they would not work, and so we expect that with enough tuning we can achieve a satisfactory accuracy or at least gain further insight into why these methods under-perform.
+\subsection{Continuous Heuristics}
+\paragraph{}
+In \cite{friesen2017deep}, Friesen and Domingos developed a similar target propagation method to the one discussed in this paper. They propose the following heuristic for target generation. Consider a layer $i\in \{2,\dots, \ell\}$. We want to generate candidate targets for $T^{i-1}$, a $\pm 1$ valued matrix of dimension $\text{rows}(W^i)\times \text{s}$, where $s$ is the batch size chosen for Algorithm $1$. Our objective is to minimize the loss at layer $i$, i.e. minimize
+$$L(W^iT^{i-1}, T^i)$$
+when viewed as a function of $T^{i-1}$. We can use the gradient of this loss function, evaluated at the previous setting of $T^{i-1}$, and round it using a sign function $g$ to obtain an effective target setting (see \cite{friesen2017deep}):
+$$T = g(-\nabla_{T^{i-1}}L(W^iT^{i-1}, T^i)).$$
+That is we set an entry $t$ of $T$ to $1$ if the partial derivative of the loss function with respect to $t$ is negative, and set $t$ to $-1$ if that partial derivative is non-negative.
+
+This immediately invites potential improvements to the heuristic. We could draw on additional methods from the nonconvex optimization literature in order to improve the target setting heuristic. For example, one can apply momentum to target setting in the following way:
+$$T = g\left(\mu T^{i-1} - \frac{\nabla_{T^{i-1}}L(W^iT^{i-1}, T^i)}{ \Vert \nabla_{T^{i-1}}L(W^iT^{i-1}, T^i) \Vert}\right)$$
+where $\mu$ is a parameter deciding how strongly we should weight the previous target setting.
+\paragraph{Future Experiments}
+It is an open question for us to experiment with the effectiveness of adding momentum to target setting. Further, we conjecture that combining high quality target generation from a gradient based method with a search heuristic to verify if there are any local improvements which can be made should lead to the best quality target generation heuristic among the methods discussed in this paper.
