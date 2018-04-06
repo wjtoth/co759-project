@@ -36,7 +36,7 @@ def main():
 
     # model arguments
     parser.add_argument('--model', type=str, default='convnet4',
-                        choices=('convnet4', 'convnet8'))
+                        choices=('convnet4', 'convnet8', 'toynet'))
     parser.add_argument('--nonlin', type=str, default='relu',
                         choices=('relu', 'step01', 'step11', 'staircase'))
 
@@ -74,7 +74,7 @@ def main():
     parser.add_argument('--data-root', type=str, default='',
                         help='root directory for imagenet dataset '
                              '(with separate train, val, test folders)')     
-    parser.add_argument('--no-aug', action='store_true',
+    parser.add_argument('--no-aug', action='store_true', default=False,
                         help='if specified, do not use data augmentation ' 
                              '(default=True for MNIST, False for CIFAR10)')
     parser.add_argument('--download', action='store_true',
@@ -106,6 +106,8 @@ def main():
     args.cuda = args.cuda and torch.cuda.is_available()
     args.grad_tp_rule = tp.TPRule[args.grad_tp_rule]
     args.lr_decay_epochs = [] if args.lr_decay_epochs is None else args.lr_decay_epochs
+    if not args.no_aug:
+        args.no_aug = True if args.dataset == 'mnist' else False
     
     train_loader, val_loader, _, num_classes = \
         create_datasets(args.dataset, args.batch, args.test_batch, not args.no_aug, 
@@ -127,6 +129,8 @@ def main():
 
     if args.dataset == 'mnist':
         input_shape = (1, 28, 28)
+        if args.model == 'toynet':
+            input_shape = (784,)
     elif args.dataset.startswith('cifar'):
         input_shape = (3, 32, 32)
     elif args.dataset == 'svhn':
@@ -143,6 +147,11 @@ def main():
     elif args.model == 'convnet8':
         network = ConvNet8(nonlin=nonlin, input_shape=input_shape, 
                            separate_activations=args.comb_opt)
+    elif args.model == 'toynet':
+        if args.dataset != 'mnist':
+            raise NotImplementedError('Toy network can only be trained on MNIST.')
+        network = ToyNet(nonlin=nonlin, input_shape=input_shape,
+                         separate_activations=args.comb_opt)
     network.needs_backward_twice = False
     if args.nonlin.startswith('step') or args.nonlin == 'staircase':
         network.targetprop_rule = args.grad_tp_rule
@@ -170,7 +179,7 @@ def main():
             if args.comb_opt_method == 'local_search':
                 target_optimizer = partial(
                     LocalSearchOptimizer, batch_size=args.batch, 
-                    candidates=10, iterations=10)
+                    candidates=6, iterations=10)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -590,9 +599,13 @@ def train(model, train_dataset_loader, eval_dataset_loader,
         last_time = time()
         model.train()
         for i, (inputs, labels, _) in enumerate(train_dataset_loader):
+            if inputs.shape[0] != train_dataset_loader.batch_size:
+                continue
             inputs, labels = Variable(inputs), Variable(labels)
             if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
+            if isinstance(model, ToyNet):
+                inputs = inputs.view(train_dataset_loader.batch_size, 784)
             if i % 10 == 1:
                 model.eval()
                 outputs = model(inputs)
@@ -663,10 +676,14 @@ def evaluate(model, dataset_loader, loss_function,
     model.eval()
     total_loss, total_accuracy, total_accuracy_top5 = 0, 0, 0
     for inputs, labels in dataset_loader:
+        if inputs.shape[0] != dataset_loader.batch_size:
+            continue
         inputs = Variable(inputs, volatile=True)
         labels = Variable(labels, volatile=True)
         if use_gpu:
             inputs, labels = inputs.cuda(), labels.cuda()
+        if isinstance(model, ToyNet):
+            inputs = inputs.view(dataset_loader.batch_size, 784)
         outputs = model(inputs)
         loss = loss_function(outputs, labels).data[0]
         total_loss += loss
@@ -764,13 +781,16 @@ class ToyNet(nn.Module):
         super().__init__()
         self.input_size = input_shape[0]
         self.fc1_size = 6
+        self.separate_activations = separate_activations
+
+        self.input_sizes = [list(input_shape), [self.fc1_size]]
 
         block1 = OrderedDict([
             ('fc1', nn.Linear(self.input_size, self.fc1_size)), 
             ('nonlin1', nonlin()),
         ])
         block2 = OrderedDict([
-            ('fc2', nn.Linear(self.fc1_size, 2)),
+            ('fc2', nn.Linear(self.fc1_size, 10)),
         ])
 
         if self.separate_activations:
@@ -784,7 +804,7 @@ class ToyNet(nn.Module):
                 ('block2', nn.Sequential(block2)),
             ]))
 
-    def forward(x):
+    def forward(self, x):
         if self.separate_activations:
             for i, module in enumerate(self.all_modules):
                 if i == 0:
@@ -819,7 +839,7 @@ class ConvNet4(nn.Module):
 
         block1 = OrderedDict([
             ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, 
-                                kernel_size=5, padding=2)),
+                                kernel_size=5, padding=3)),
             ('maxpool1', nn.MaxPool2d(2)),
             ('nonlin1', nonlin()),
         ])
