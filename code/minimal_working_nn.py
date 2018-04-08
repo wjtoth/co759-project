@@ -28,6 +28,7 @@ from util.reshapemodule import ReshapeBatch
 
 # ours
 import adversarial
+from graph_nn import get_graphs
 
 
 def main():
@@ -70,7 +71,8 @@ def main():
 
     # data arguments
     parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=('mnist', 'cifar10', 'cifar100', 'svhn', 'imagenet'))
+                        choices=('mnist', 'cifar10', 'cifar100', 
+                                 'svhn', 'imagenet', 'graphs'))
     parser.add_argument('--data-root', type=str, default='',
                         help='root directory for imagenet dataset '
                              '(with separate train, val, test folders)')     
@@ -109,10 +111,15 @@ def main():
     if not args.no_aug:
         args.no_aug = True if args.dataset == 'mnist' else False
     
-    train_loader, val_loader, _, num_classes = \
-        create_datasets(args.dataset, args.batch, args.test_batch, not args.no_aug, 
-                        args.no_val, args.data_root, args.cuda, args.seed, 
-                        args.nworkers, args.dbg_ds_size, args.download)
+    if args.dataset == 'graphs':
+        train_loader, val_loader = get_graphs(
+            6, batch_size=args.batch, num_workers=args.nworkers)
+        num_classes = 2
+    else:
+        train_loader, val_loader, _, num_classes = \
+            create_datasets(args.dataset, args.batch, args.test_batch, not args.no_aug, 
+                            args.no_val, args.data_root, args.cuda, args.seed, 
+                            args.nworkers, args.dbg_ds_size, args.download)
     if args.adv_eval:
         adversarial_eval_dataset = get_adversarial_dataset(args)
 
@@ -137,6 +144,8 @@ def main():
         input_shape = (3, 40, 40)
     elif args.dataset == 'imagenet':
         input_shape = (3, 224, 224)
+    elif args.dataset == 'graphs':
+        input_shape = (15,)
     else:
         raise NotImplementedError('no other datasets currently supported')
 
@@ -148,10 +157,12 @@ def main():
         network = ConvNet8(nonlin=nonlin, input_shape=input_shape, 
                            separate_activations=args.comb_opt)
     elif args.model == 'toynet':
-        if args.dataset != 'mnist':
-            raise NotImplementedError('Toy network can only be trained on MNIST.')
+        if args.dataset not in ['mnist', 'graphs']:
+            raise NotImplementedError(
+                'Toy network can only be trained on MNIST or graph connectivity task.')
         network = ToyNet(nonlin=nonlin, input_shape=input_shape,
-                         separate_activations=args.comb_opt)
+                         separate_activations=args.comb_opt, 
+                         num_classes=num_classes)
     network.needs_backward_twice = False
     if args.nonlin.startswith('step') or args.nonlin == 'staircase':
         network.targetprop_rule = args.grad_tp_rule
@@ -598,20 +609,30 @@ def train(model, train_dataset_loader, eval_dataset_loader,
                      eval_metrics, log=True, use_gpu=use_gpu)
         last_time = time()
         model.train()
-        for i, (inputs, labels, _) in enumerate(train_dataset_loader):
+        for i, batch in enumerate(train_dataset_loader):
+            if args.dataset == 'graphs':
+                inputs, labels = batch
+            else:
+                inputs, labels, _ = batch
             if inputs.shape[0] != train_dataset_loader.batch_size:
                 continue
             inputs, labels = Variable(inputs), Variable(labels)
             if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
             if isinstance(model, ToyNet):
-                inputs = inputs.view(train_dataset_loader.batch_size, 784)
+                try:
+                    inputs = inputs.view(train_dataset_loader.batch_size, 784)
+                except RuntimeError:
+                    inputs = inputs.view(train_dataset_loader.batch_size, 15)
             if i % 10 == 1:
                 model.eval()
                 outputs = model(inputs)
                 loss = loss_function(outputs, labels)
                 batch_accuracy = accuracy(outputs, labels)
-                batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5)
+                if isinstance(model, ToyNet):
+                    batch_accuracy_top5 = 0
+                else:
+                    batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5)
                 if i == 1:
                     steps = 1
                 else:
@@ -683,16 +704,23 @@ def evaluate(model, dataset_loader, loss_function,
         if use_gpu:
             inputs, labels = inputs.cuda(), labels.cuda()
         if isinstance(model, ToyNet):
-            inputs = inputs.view(dataset_loader.batch_size, 784)
+            try:
+                inputs = inputs.view(dataset_loader.batch_size, 784)
+            except RuntimeError:
+                inputs = inputs.view(dataset_loader.batch_size, 15)
         outputs = model(inputs)
         loss = loss_function(outputs, labels).data[0]
         total_loss += loss
         total_accuracy += accuracy(outputs, labels)
-        total_accuracy_top5 += accuracy_topk(outputs, labels, k=5)
+        if not isinstance(model, ToyNet):
+            total_accuracy_top5 += accuracy_topk(outputs, labels, k=5)
 
     loss = total_loss / len(dataset_loader)
     total_accuracy = total_accuracy / len(dataset_loader)
-    total_accuracy_top5 = total_accuracy_top5 / len(dataset_loader)
+    if isinstance(model, ToyNet):
+        total_accuracy_top5 = 0
+    else:
+        total_accuracy_top5 = total_accuracy_top5 / len(dataset_loader)
     if log:
         print('\nevaluation --- loss: %.3f, acc: %.3f, acc_top5: %.3f \n' 
               % (loss, total_accuracy, total_accuracy_top5))
@@ -777,7 +805,7 @@ def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
 class ToyNet(nn.Module):
 
     def __init__(self, nonlin=nn.ReLU, input_shape=(784,), 
-                 separate_activations=True):
+                 separate_activations=True, num_classes=10):
         super().__init__()
         self.input_size = input_shape[0]
         self.fc1_size = 6
@@ -790,7 +818,7 @@ class ToyNet(nn.Module):
             ('nonlin1', nonlin()),
         ])
         block2 = OrderedDict([
-            ('fc2', nn.Linear(self.fc1_size, 10)),
+            ('fc2', nn.Linear(self.fc1_size, num_classes)),
         ])
 
         if self.separate_activations:
