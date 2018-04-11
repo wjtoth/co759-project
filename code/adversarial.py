@@ -29,7 +29,7 @@ try:
     }
 
 except ImportError:
-    ATTACKS = {"error foolbox not available"}
+    ATTACKS = {"error foolbox not available": {}}
     print('foolbox was not loaded...')
 
 def generate_adversarial_examples(model, attack, dataset, criterion, 
