@@ -190,7 +190,7 @@ def main():
             if args.comb_opt_method == 'local_search':
                 target_optimizer = partial(
                     LocalSearchOptimizer, batch_size=args.batch, 
-                    candidates=6, iterations=10)
+                    candidates=10, iterations=10)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -220,6 +220,41 @@ def main():
                 args.adv_attack, args.test_batch, num_classes, 
                 args.adv_epsilon, args.cuda)
             print('Failure rate: %0.2f%%' % (100*failure_rate))
+
+
+def convert_to_1hot(target, noutputs, make_11=True):
+    if target.is_cuda:
+        target_1hot = torch.cuda.CharTensor(target.shape[0], noutputs)
+    else:
+        target_1hot = torch.CharTensor(target.shape[0], noutputs)
+    target_1hot.zero_()
+    target_1hot.scatter_(1, target.unsqueeze(1), 1)
+    target_1hot = target_1hot.type(target.type())
+    if make_11:
+        target_1hot = target_1hot * 2 - 1
+    return target_1hot
+
+
+def multiclass_hinge_loss(input_, target, size_average=True, reduce_=True):
+    """Compute hinge loss: max(0, 1 - input * target)"""
+    target_1hot = convert_to_1hot(target.data, input_.shape[1], make_11=True).float()
+    if type(input_) is Variable:
+        target_1hot = Variable(target_1hot)
+    # max(0, 1-z*t)
+    loss = (-target_1hot * input_.float() + 1.0).clamp(min=0).sum(dim=1)
+    if reduce_:
+        if size_average:
+            loss = loss.mean(dim=0)
+        else:
+            loss = loss.sum(dim=0)
+    return loss
+
+
+def soft_hinge_loss(z, t, xscale=1.0, yscale=1.0, reduce_=True):
+    loss = yscale * torch.tanh(-(z * t).float() * xscale) + 1
+    if reduce_:
+        loss = loss.sum(dim=1)
+    return loss
 
 
 class TargetPropOptimizer:
@@ -253,76 +288,10 @@ class TargetPropOptimizer:
         """
         raise NotImplementedError
 
-    def evaluate_targets(self, train_step, module_index, input, label, target):
-        """
-        Subclasses should override this method. The method should evaluate 
-        each stored target and update the state of the optimizer 
-        with the evaluation data. 
-        """
-        raise NotImplementedError
-
-    def choose_targets(self, train_step, module_index, input, label, target):
-        """
-        Subclasses should override this method. The method should filter 
-        the stored targets based on the evaluation data and return 
-        a target torch.Tensor, list of target torch.Tensors, 
-        or dictionary of target torch.Tensors.
-        """
-        raise NotImplementedError
-
     def step(self, train_step, module_index, target, input=None, 
              label=None, base_targets=None):
-        self.generate_targets(train_step, module_index, input, 
-                              label, target, base_targets)
-        return self.choose_targets(train_step, module_index, 
-                                   input, label, target)
-
-
-def convert_to_1hot(target, noutputs, make_11=True):
-    if target.dim() == 1:
-        if target.is_cuda:
-            target_1hot = torch.cuda.CharTensor(target.shape[0], noutputs)
-        else:
-            target_1hot = torch.CharTensor(target.shape[0], noutputs)
-        indices = target.unsqueeze(1)
-        target_1hot.zero_()
-        target_1hot.scatter_(1, indices, 1)
-    elif target.dim() == 2:
-        if target.is_cuda:
-            target_1hot = torch.cuda.CharTensor(
-                target.shape[0], target.shape[1], noutputs)
-        else:
-            target_1hot = torch.CharTensor(
-                target.shape[0], target.shape[1], noutputs)
-        indices = target.unsqueeze(2)
-        target_1hot.zero_()
-        target_1hot.scatter_(2, indices, 1)
-    else:
-        raise ValueError("Target must have 1 or 2 dimensions, " 
-                         "but it has {} dimensions".format(target.dim()))
-    target_1hot = target_1hot.type(target.type())
-    if make_11:
-        target_1hot = target_1hot * 2 - 1
-    return target_1hot
-
-
-def multiclass_hinge_loss(input_, target, reduce_=True):
-    """Compute hinge loss: max(0, 1 - input * target)"""
-    if input_.dim() == 2:
-        noutputs = input_.shape[1]
-    elif input_.dim() == 3:
-        noutputs = input_.shape[2]
-    else:
-        raise ValueError("Input must have 2 or 3 dimensions, " 
-                         "but it has {} dimensions".format(input_.dim()))
-    target_1hot = convert_to_1hot(target.data, noutputs, make_11=True).float()
-    if type(input_) is Variable:
-        target_1hot = Variable(target_1hot)
-    # max(0, 1-z*t)
-    loss = (-target_1hot * input_.float() + 1.0).clamp(min=0).sum(dim=1)
-    if reduce_:
-        loss = loss.mean(dim=0)
-    return loss
+        return self.generate_targets(train_step, module_index, input, 
+                                     label, target, base_targets)
 
 
 class LocalSearchOptimizer(TargetPropOptimizer):
@@ -344,7 +313,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         module = self.modules[module_index]
         if module_index > 0:
             target = target.float()
-            loss_function = torch.nn.MSELoss(size_average=False, reduce=False)
+            loss_function = partial(soft_hinge_loss, reduce_=False)
 
         # Generate a candidate target
         if self.use_gpu:
@@ -365,14 +334,9 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                 candidates.append(candidate.clone())
                 candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
             candidate_losses = self.evaluate_targets(
-                module, loss_function, target, candidates)
+                module, module_index, loss_function, target, candidates)
             candidate_index, loss = self.choose_target(candidate_losses)
             candidate = candidates[candidate_index.data[0]]
-        #     if train_step % 50 == 1 and k == 0:
-        #         print("Layer", str(module_index) + ":")
-        #         print(candidate_losses.data)
-        # if train_step % 50 == 1:
-        #     print(candidate_losses.data)
 
         if self.use_gpu:
             candidate_var = Variable(candidate).cuda()
@@ -391,7 +355,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
             print("Chosen target loss:", loss.data[0])
         return self.state["candidates"][index][0], loss
 
-    def evaluate_targets(self, module, loss_function, target, candidates):
+    def evaluate_targets(self, module, module_index, loss_function, target, candidates):
         candidate_batch = torch.stack(candidates)
         target_batch = torch.stack([target]*len(candidates))
         candidate_batch = candidate_batch.view(
@@ -405,6 +369,8 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         else:
             candidate_var = Variable(candidate_batch)
         output = module(candidate_var)
+        if module_index > 0:
+            output = output.view_as(target_batch)
         losses = loss_function(output, target_batch)
         losses = losses.view(len(candidates), int(np.prod(target.shape)))
         return losses.mean(dim=1)  # mean everything but candidate batch dim
@@ -416,11 +382,6 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         else:
             loss, candidate_index =  torch.min(losses, 0)
         return candidate_index, loss
-
-    def step(self, train_step, module_index, target, input=None, 
-             label=None, base_targets=None):
-        return self.generate_targets(train_step, module_index, input, 
-                                     label, target, base_targets)
 
 
 class Target:
@@ -466,7 +427,7 @@ class GeneticOptimizer(TargetPropOptimizer):
         candidate_size = self.sizes[module_index]
         if module_index > 0:
             target = target.float()
-            loss_function = torch.nn.MSELoss(size_average=False, reduce=False)
+            loss_function = partial(soft_hinge_loss, reduce_=False)
 
         # generate a population of targets
         population = []
@@ -475,7 +436,7 @@ class GeneticOptimizer(TargetPropOptimizer):
             candidate = Target(candidate_size, random=True, use_gpu=self.use_gpu)           
             population.append(candidate)
         candidate_losses = self.evaluate_targets(
-                module, loss_function, target, 
+                module, module_index, loss_function, target, 
                 [target.values for target in population])
         population = self.filter_targets(population, candidate_losses)
 
@@ -494,7 +455,7 @@ class GeneticOptimizer(TargetPropOptimizer):
                 child_candidate.crossover(population[c1], population[c2])          
                 population.append(child_candidate)
             candidate_losses = self.evaluate_targets(
-                module, loss_function, target, 
+                module, module_index, loss_function, target, 
                 [target.values for target in population])
             population = self.filter_targets(population, candidate_losses)
 
@@ -513,7 +474,7 @@ class GeneticOptimizer(TargetPropOptimizer):
             [loss for candidate, loss in self.state["candidates"]])
         return self.state["candidates"][index][0], loss
 
-    def evaluate_targets(self, module, loss_function, target, candidates):
+    def evaluate_targets(self, module, module_index, loss_function, target, candidates):
         candidate_batch = torch.stack(candidates)
         target_batch = torch.stack([target]*len(candidates))
         candidate_batch = candidate_batch.view(
@@ -527,6 +488,8 @@ class GeneticOptimizer(TargetPropOptimizer):
         else:
             candidate_var = Variable(candidate_batch)
         output = module(candidate_var)
+        if module_index > 0:
+            output = output.view_as(target_batch)
         losses = loss_function(output, target_batch)
         losses = losses.view(len(candidates), int(np.prod(target.shape)))
         return losses.mean(dim=1)  # mean everything but candidate batch dim
@@ -544,11 +507,6 @@ class GeneticOptimizer(TargetPropOptimizer):
         else:
             loss, candidate_index =  torch.min(losses, 0)
         return candidate_index, loss
-
-    def step(self, train_step, module_index, target, input=None, 
-             label=None, base_targets=None):
-        return self.generate_targets(train_step, module_index, input, 
-                                     label, target, base_targets)
 
 
 def accuracy(prediction, target):
@@ -658,8 +616,7 @@ def train(model, train_dataset_loader, eval_dataset_loader,
                     if j == len(modules)-1:
                         # no target generation at initial layer/module
                         outputs = module(inputs)
-                        loss = torch.nn.MSELoss(
-                            size_average=False)(outputs, targets.float())
+                        loss = soft_hinge_loss(outputs, targets.float()).mean()
                     else:
                         targets, loss = target_optimizer.step(
                             train_step, j, targets, label=labels)
@@ -808,7 +765,7 @@ class ToyNet(nn.Module):
                  separate_activations=True, num_classes=10):
         super().__init__()
         self.input_size = input_shape[0]
-        self.fc1_size = 6
+        self.fc1_size = 10
         self.separate_activations = separate_activations
 
         self.input_sizes = [list(input_shape), [self.fc1_size]]
@@ -860,7 +817,8 @@ class ConvNet4(nn.Module):
 
         self.input_sizes = [
             list(input_shape), 
-            [self.conv1_size, (input_shape[1]//4)*(input_shape[2]//4)//4, self.conv2_size//4], 
+            [self.conv1_size, (input_shape[1]//4)*(input_shape[2]//4)//4 + 1, 
+             self.conv2_size//4 + 1], 
             [(input_shape[1] // 4) * (input_shape[2] // 4) * self.conv2_size], 
             [self.fc1_size],
         ]
