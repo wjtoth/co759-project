@@ -1,10 +1,11 @@
 
 import numpy as np
-import foolbox
 from torch import nn
 
+try:
+    import foolbox
 
-ATTACKS = {
+    ATTACKS = {
     "fgsm": {"class": foolbox.attacks.FGSM, 
              "kwargs": {}},
     "iterative_fgsm": {"class": foolbox.attacks.IterativeGradientSignAttack,
@@ -19,14 +20,17 @@ ATTACKS = {
                      "kwargs": {"R": 25}},
     "boundary_attack": {"class": foolbox.attacks.BoundaryAttack,
                         "kwargs": {"iterations": 50, "log_every_n_steps": 500}},
-}
+    }
 
-CRITERIA = {
-    "untargeted_misclassify": foolbox.criteria.Misclassification(),
-    "untargeted_top5_misclassify": foolbox.criteria.TopKMisclassification(5),
-    "targeted_correct_class": foolbox.criteria.TargetClass,
-}
+    CRITERIA = {
+        "untargeted_misclassify": foolbox.criteria.Misclassification(),
+        "untargeted_top5_misclassify": foolbox.criteria.TopKMisclassification(5),
+        "targeted_correct_class": foolbox.criteria.TargetClass,
+    }
 
+except ImportError:
+    ATTACKS = {"error foolbox not available"}
+    print('foolbox was not loaded...')
 
 def generate_adversarial_examples(model, attack, dataset, criterion, 
                                   pixel_bounds=(0, 255), num_classes=10, 

@@ -27,8 +27,8 @@ from models.convnet8 import ConvNet8
 from util.reshapemodule import ReshapeBatch
 
 # ours
+import adversarial
 from graph_nn import get_graphs
-
 
 def main():
     # argument definitions
@@ -205,7 +205,6 @@ def main():
         print('Finished training\n')
 
     if args.adv_eval:
-        import adversarial
         print('Evaluating on adversarial examples...')
         if args.adv_attack == 'all':
             for attack in adversarial.ATTACKS:
