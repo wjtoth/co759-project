@@ -326,12 +326,20 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         # Local search to find candidates
         perturb_size = candidate.shape[1] // self.candidates
         for k in range(0, self.iterations):
-            # Flip tensor in chunks of rows to reduce number of loss evaluations
+            prob_dist = Complete_Neighbourhood_Iterator(self.sizes[module_index])
+            flip_list = prob_dist.next()
+            
             candidates = [candidate.clone()]
-            for i in range(0, self.candidates):
-                candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
-                candidates.append(candidate.clone())
-                candidate = self.boxflip(candidate, perturb_size*i, perturb_size*(i+1))
+            while flip_list != []:
+                for (x,y) in flip_list:
+                    #do flip
+                    candidate[x,y]=-candidate[x,y]
+                    #append new candidate
+                    candidates.append(candidate.clone())
+                    #undo flip
+                    candidate[x,y]=-candidate[x,y]
+                flip_list = prob_dist.next()
+           
             candidate_losses = self.evaluate_targets(
                 module, module_index, loss_function, target, candidates)
             candidate_index, loss = self.choose_target(candidate_losses)
@@ -382,6 +390,38 @@ class LocalSearchOptimizer(TargetPropOptimizer):
             loss, candidate_index =  torch.min(losses, 0)
         return candidate_index, loss
 
+
+class Neighbourhood_Iterator:
+    def __init__(self, dimensions):
+        self.dimensions = dimensions
+
+    def next():
+        """ Returns a list of coordinates to flip for next
+            point in neighbourhood to explore.
+            Returning [] indicates there are no more neighbours to explore"""
+        raise NotImplementedError
+
+class Complete_Neighbourhood_Iterator(Neighbourhood_Iterator):
+    def __init__(self, dimensions):
+        super().__init__(dimensions)
+        self.x_size = self.dimensions[0]
+        self.y_size = self.dimensions[1]
+        self.x = -1
+        self.y = self.y_size-1
+        self.first_next = True
+
+    def next(self):
+        """ Returns a list of coordinates to flip for next
+            point in neighbourhood to explore.
+            Returning [] indicates there are no more neighbours to explore"""
+        self.y = (self.y + 1) % self.y_size
+        if self.y == 0:
+            self.x = (self.x + 1) % self.x_size
+        if self.x == 0 and self.y == 0:
+            if  not self.first_next:
+                return []
+            self.first_next = False
+        return [(self.x, self.y)]
 
 class Target:
 
