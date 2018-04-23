@@ -336,10 +336,17 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                     candidate[x,y]=-candidate[x,y]
                     #append new candidate
                     candidates.append(candidate.clone())
+                    if len(candidates) > 50000:#batch size (TODO parameterize)
+                        candidate_losses = self.evaluate_targets(
+                            module, module_index, loss_function, target, candidates)
+                        candidate_index, loss = self.choose_target(candidate_losses)
+                        candidate = candidates[candidate_index.data[0]]
+                        candidates = [candidate]
                     #undo flip
                     candidate[x,y]=-candidate[x,y]
                 flip_list = prob_dist.next()
-           
+
+           #TODO make this a function?
             candidate_losses = self.evaluate_targets(
                 module, module_index, loss_function, target, candidates)
             candidate_index, loss = self.choose_target(candidate_losses)
