@@ -342,6 +342,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                         candidate_index, loss = self.choose_target(candidate_losses)
                         candidate = candidates[candidate_index.data[0]]
                         candidates = [candidate]
+                        print(candidates)
                     #undo flip
                     candidate[x,y]=-candidate[x,y]
                 flip_list = prob_dist.next()
