@@ -336,8 +336,8 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                     candidate[x,y]=-candidate[x,y]
                     #append new candidate
                     candidates.append(candidate.clone())
-                    print(len(candidates))
-                    if len(candidates) > 50000:#batch size (TODO parameterize)
+                    #print(len(candidates))
+                    if len(candidates) > 64*64:#batch size (TODO parameterize)
                         candidate_losses = self.evaluate_targets(
                             module, module_index, loss_function, target, candidates)
                         candidate_index, loss = self.choose_target(candidate_losses)
