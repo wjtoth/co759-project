@@ -940,20 +940,29 @@ class StepF(Function):
     update upstream weights in the network.
     """
 
-    def __init__(self, targetprop_rule=tp.TPRule.WtHinge, 
-                 make01=False, scale_by_grad_out=False):
+    def __init__(self, targetprop_rule=tp.TPRule.WtHinge, make01=False, 
+                 scale_by_grad_out=False, use_momentum=False, 
+                 momentum_factor=0, num_classes=None):
         super(StepF, self).__init__()
         self.tp_rule = targetprop_rule
         self.make01 = make01
         self.scale_by_grad_out = scale_by_grad_out
         self.target = None
         self.saved_grad_out = None
+        self.use_momentum = use_momentum
+        self.momentum_factor = momentum_factor
+        self.momentum_state = {i: None for i in range(num_classes)}
+        self.input_label = None
         # assert not (self.tp_rule == tp.TPRule.SSTE and self.scale_by_grad_out), \
         #     'scale_by_grad and SSTE are incompatible'
         # assert not (self.tp_rule == tp.TPRule.STE and self.scale_by_grad_out), \
         #     'scale_by_grad and STE are incompatible'
         # assert not (self.tp_rule == tp.TPRule.Ramp and self.scale_by_grad_out), \
         #     'scale_by_grad and Ramp are incompatible'
+
+    def initialize_momentum_state(self, target_shape):
+        for label in self.momentum_state:
+            self.momentum_state[label] = torch.LongTensor(*target_shape)
 
     def forward(self, input_):
         self.save_for_backward(input_)
@@ -964,13 +973,20 @@ class StepF(Function):
 
     def backward(self, grad_output):
         input_, = self.saved_tensors
+        momentum_tensor = self.momentum_state[self.input_label]
         grad_input = None
         if self.needs_input_grad[0]:
             # compute targets = neg. sign of output grad, 
             # where t \in {-1, 0, 1} (t = 0 means ignore this unit)
             go = grad_output if self.saved_grad_out is None else self.saved_grad_out
             tp_grad_func = tp.TPRule.get_backward_func(self.tp_rule)
-            grad_input, self.target = tp_grad_func(input_, go, self.target, self.make01)
+            if self.use_momentum:
+                grad_input, self.target = tp_grad_func(
+                    input_, go, None, self.make01, velocity=momentum_tensor, 
+                    momentum_factor=self.momentum_factor, return_target=True)
+            else:
+                grad_input, self.target = tp_grad_func(
+                    input_, go, self.target, self.make01)
             if self.scale_by_grad_out:
                 # remove batch-size scaling
                 grad_input = grad_input * go.shape[0] * go.abs()  
