@@ -959,8 +959,7 @@ class StepF(Function):
     """
 
     def __init__(self, targetprop_rule=tp.TPRule.WtHinge, make01=False, 
-                 scale_by_grad_out=False, use_momentum=False, 
-                 momentum_factor=0, num_classes=None):
+                 scale_by_grad_out=False, use_momentum=False, momentum_factor=0):
         super(StepF, self).__init__()
         self.tp_rule = targetprop_rule
         self.make01 = make01
@@ -969,8 +968,8 @@ class StepF(Function):
         self.saved_grad_out = None
         self.use_momentum = use_momentum
         self.momentum_factor = momentum_factor
-        self.momentum_state = {i: None for i in range(num_classes)}
-        self.input_label = None
+        self.momentum_state = None
+        self.batch_labels = None
         # assert not (self.tp_rule == tp.TPRule.SSTE and self.scale_by_grad_out), \
         #     'scale_by_grad and SSTE are incompatible'
         # assert not (self.tp_rule == tp.TPRule.STE and self.scale_by_grad_out), \
@@ -978,9 +977,9 @@ class StepF(Function):
         # assert not (self.tp_rule == tp.TPRule.Ramp and self.scale_by_grad_out), \
         #     'scale_by_grad and Ramp are incompatible'
 
-    def initialize_momentum_state(self, target_shape):
-        for label in self.momentum_state:
-            self.momentum_state[label] = torch.LongTensor(*target_shape)
+    def initialize_momentum_state(self, target_shape, num_classes):
+        self.momentum_state = torch.zeros(
+            num_classes, *target_shape).type(torch.LongTensor)
 
     def forward(self, input_):
         self.save_for_backward(input_)
@@ -991,7 +990,7 @@ class StepF(Function):
 
     def backward(self, grad_output):
         input_, = self.saved_tensors
-        momentum_tensor = self.momentum_state[self.input_label]
+        momentum_tensor = self.momentum_state
         grad_input = None
         if self.needs_input_grad[0]:
             # compute targets = neg. sign of output grad, 
@@ -1000,7 +999,7 @@ class StepF(Function):
             tp_grad_func = tp.TPRule.get_backward_func(self.tp_rule)
             if self.use_momentum:
                 grad_input, self.target = tp_grad_func(
-                    input_, go, None, self.make01, velocity=momentum_tensor, 
+                    input_, go, None, self.make01, velocity=momentum_tensor.float(), 
                     momentum_factor=self.momentum_factor, return_target=True)
             else:
                 grad_input, self.target = tp_grad_func(
