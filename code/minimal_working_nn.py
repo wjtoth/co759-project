@@ -326,7 +326,8 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         # Local search to find candidates
         perturb_size = candidate.shape[1] // self.candidates
         for k in range(0, self.iterations):
-            prob_dist = Complete_Neighbourhood_Iterator(self.sizes[module_index])
+            samples = candidate.shape[1] // 10
+            prob_dist = Random_Neighbourhood_Iterator(self.sizes[module_index], samples)
             flip_list = prob_dist.next()
             
             candidates = [candidate.clone()]
@@ -336,12 +337,13 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                     candidate[x,y]=-candidate[x,y]
                     #append new candidate
                     candidates.append(candidate.clone())
-                    if len(candidates) > 50000:#batch size (TODO parameterize)
+                    #print(len(candidates))
+                    if len(candidates) >= 64:#batch size (TODO parameterize)
                         candidate_losses = self.evaluate_targets(
                             module, module_index, loss_function, target, candidates)
                         candidate_index, loss = self.choose_target(candidate_losses)
-                        candidate = candidates[candidate_index.data[0]]
-                        candidates = [candidate]
+                        opt_candidate = candidates[candidate_index.data[0]]
+                        candidates = [opt_candidate]
                     #undo flip
                     candidate[x,y]=-candidate[x,y]
                 flip_list = prob_dist.next()
@@ -407,6 +409,22 @@ class Neighbourhood_Iterator:
             point in neighbourhood to explore.
             Returning [] indicates there are no more neighbours to explore"""
         raise NotImplementedError
+
+import random
+class Random_Neighbourhood_Iterator(Neighbourhood_Iterator):
+    def __init__(self, dimension, samples):
+        super().__init__(dimension)
+        self.samples = samples
+        self.x_size = self.dimensions[0]
+        self.y_size = self.dimensions[1]
+        self.sample_count = 0
+    def next(self):
+        x = random.randrange(self.x_size)
+        y = random.randrange(self.y_size)
+        self.sample_count += 1
+        if self.sample_count <= self.samples:
+            return [(x,y)]
+        return []
 
 class Complete_Neighbourhood_Iterator(Neighbourhood_Iterator):
     def __init__(self, dimensions):
