@@ -126,9 +126,11 @@ def main():
     if args.nonlin == 'relu':
         nonlin = nn.ReLU
     elif args.nonlin == 'step01':
-        nonlin = partial(Step, make01=True, targetprop_rule=args.grad_tp_rule)
+        nonlin = partial(Step, make01=True, targetprop_rule=args.grad_tp_rule, 
+                         use_momentum=False, momentum_factor=0.05)
     elif args.nonlin == 'step11':
-        nonlin = partial(Step, make01=False, targetprop_rule=args.grad_tp_rule)
+        nonlin = partial(Step, make01=False, targetprop_rule=args.grad_tp_rule,
+                         use_momentum=False, momentum_factor=0.05)
     elif args.nonlin == 'staircase':
         nonlin = partial(activations.Staircase, targetprop_rule=args.grad_tp_rule,
                          nsteps=5, margin=1, trunc_thresh=2)
@@ -959,7 +961,8 @@ class StepF(Function):
     """
 
     def __init__(self, targetprop_rule=tp.TPRule.WtHinge, make01=False, 
-                 scale_by_grad_out=False, use_momentum=False, momentum_factor=0):
+                 scale_by_grad_out=False, use_momentum=False, momentum_factor=0,
+                 momentum_state=None, batch_labels=None):
         super(StepF, self).__init__()
         self.tp_rule = targetprop_rule
         self.make01 = make01
@@ -968,18 +971,8 @@ class StepF(Function):
         self.saved_grad_out = None
         self.use_momentum = use_momentum
         self.momentum_factor = momentum_factor
-        self.momentum_state = None
-        self.batch_labels = None
-        # assert not (self.tp_rule == tp.TPRule.SSTE and self.scale_by_grad_out), \
-        #     'scale_by_grad and SSTE are incompatible'
-        # assert not (self.tp_rule == tp.TPRule.STE and self.scale_by_grad_out), \
-        #     'scale_by_grad and STE are incompatible'
-        # assert not (self.tp_rule == tp.TPRule.Ramp and self.scale_by_grad_out), \
-        #     'scale_by_grad and Ramp are incompatible'
-
-    def initialize_momentum_state(self, target_shape, num_classes):
-        self.momentum_state = torch.zeros(
-            num_classes, *target_shape).type(torch.LongTensor)
+        self.momentum_state = momentum_state
+        self.batch_labels = batch_labels
 
     def forward(self, input_):
         self.save_for_backward(input_)
@@ -990,7 +983,6 @@ class StepF(Function):
 
     def backward(self, grad_output):
         input_, = self.saved_tensors
-        momentum_tensor = self.momentum_state
         grad_input = None
         if self.needs_input_grad[0]:
             # compute targets = neg. sign of output grad, 
@@ -998,9 +990,13 @@ class StepF(Function):
             go = grad_output if self.saved_grad_out is None else self.saved_grad_out
             tp_grad_func = tp.TPRule.get_backward_func(self.tp_rule)
             if self.use_momentum:
+                momentum_tensor = self.momentum_state[
+                    range(self.batch_labels.shape[0]), self.batch_labels]
                 grad_input, self.target = tp_grad_func(
                     input_, go, None, self.make01, velocity=momentum_tensor.float(), 
                     momentum_factor=self.momentum_factor, return_target=True)
+                self.momentum_state[range(self.batch_labels.shape[0]), 
+                                    self.batch_labels] = self.target
             else:
                 grad_input, self.target = tp_grad_func(
                     input_, go, self.target, self.make01)
@@ -1011,13 +1007,23 @@ class StepF(Function):
 
 
 class Step(nn.Module):
-    def __init__(self, targetprop_rule=tp.TPRule.TruncWtHinge, 
-                 make01=False, scale_by_grad_out=False):
+    def __init__(self, targetprop_rule=tp.TPRule.TruncWtHinge, make01=False, 
+                 scale_by_grad_out=False, use_momentum=False, momentum_factor=0):
         super(Step, self).__init__()
         self.tp_rule = targetprop_rule
         self.make01 = make01
         self.scale_by_grad_out = scale_by_grad_out
         self.output_hook = None
+        self.use_momentum = use_momentum
+        self.momentum_factor = momentum_factor
+        self.momentum_state = None
+        self.batch_labels = None
+        self.function = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
+                              scale_by_grad_out=self.scale_by_grad_out, 
+                              use_momentum=self.use_momentum, 
+                              momentum_factor=self.momentum_factor, 
+                              momentum_state=self.momentum_state,
+                              batch_labels=self.batch_labels)
 
     def __repr__(self):
         s = '{name}(a={a}, b={b}, tp={tp})'
@@ -1027,9 +1033,19 @@ class Step(nn.Module):
     def register_output_hook(self, output_hook):
         self.output_hook = output_hook
 
+    def initialize_momentum_state(self, target_shape, num_classes):
+        self.momentum_state = torch.zeros(
+            target_shape[0], num_classes, *target_shape[1:]).type(torch.LongTensor)
+
     def forward(self, x):
-        y = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
-                  scale_by_grad_out=self.scale_by_grad_out)(x)
+        self.momentum_state = self.function.momentum_state
+        self.function = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
+                              scale_by_grad_out=self.scale_by_grad_out, 
+                              use_momentum=self.use_momentum, 
+                              momentum_factor=self.momentum_factor, 
+                              momentum_state=self.momentum_state,
+                              batch_labels=self.batch_labels)
+        y = self.function(x)
         if self.output_hook:
             # detach the output from the input to the next layer, 
             # so we can perform target propagation
