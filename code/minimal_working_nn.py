@@ -4,6 +4,7 @@ import sys
 import argparse
 import numpy as np
 from functools import partial
+from itertools import chain
 from time import time
 from random import randint
 from collections import OrderedDict
@@ -67,6 +68,12 @@ def main():
                              'are used for target setting')
     parser.add_argument('--comb-opt-method', type=str, default='local_search',
                         choices=('local_search', 'genetic'))
+    parser.add_argument('--target-momentum', action='store_true', default=False,
+                        help='if specified, target momentum is used. '
+                             'Note: only supported with gradient-based targetprop')
+    parser.add_argument('--target-momentum-factor', type=float, default=0.0,
+                        help='factor by which to multiply the momentum tensor '
+                             'during target setting')
 
     # data arguments
     parser.add_argument('--dataset', type=str, default='cifar10',
@@ -127,10 +134,12 @@ def main():
         nonlin = nn.ReLU
     elif args.nonlin == 'step01':
         nonlin = partial(Step, make01=True, targetprop_rule=args.grad_tp_rule, 
-                         use_momentum=False, momentum_factor=0.05)
+                         use_momentum=args.target_momentum, 
+                         momentum_factor=args.target_momentum_factor)
     elif args.nonlin == 'step11':
         nonlin = partial(Step, make01=False, targetprop_rule=args.grad_tp_rule,
-                         use_momentum=False, momentum_factor=0.05)
+                         use_momentum=args.target_momentum, 
+                         momentum_factor=args.target_momentum_factor)
     elif args.nonlin == 'staircase':
         nonlin = partial(activations.Staircase, targetprop_rule=args.grad_tp_rule,
                          nsteps=5, margin=1, trunc_thresh=2)
@@ -202,7 +211,7 @@ def main():
             target_optimizer = None
 
         train(network, train_loader, val_loader, criterion, optimizer, 
-              args.epochs, target_optimizer=target_optimizer, 
+              args.epochs, num_classes, target_optimizer=target_optimizer, 
               use_gpu=args.cuda, args=args, print_param_info=False)
         print('Finished training\n')
 
@@ -599,10 +608,11 @@ class Metrics(dict):
             self[metric].append(value)
 
 
-def train(model, train_dataset_loader, eval_dataset_loader, 
-          loss_function, optimizer, epochs, target_optimizer=None, 
+def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
+          optimizer, epochs, num_classes, target_optimizer=None, 
           use_gpu=True, args=None, print_param_info=False):
     model.train()
+    batch_size = train_dataset_loader.batch_size
     train_per_layer = target_optimizer is not None
     if train_per_layer:
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
@@ -620,6 +630,13 @@ def train(model, train_dataset_loader, eval_dataset_loader,
         lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, args.lr_decay_epochs, 
                                                       gamma=args.lr_decay_factor)
         lr_schedulers = [lr_scheduler]
+        if args.target_momentum:
+            activations = list(chain.from_iterable(
+                [[child for i, child in enumerate(module) if i == len(module)-1] 
+                 for module in model.all_modules[:-1]]))
+            for i, activation in enumerate(activations):
+                activation.initialize_momentum_state(
+                    [batch_size] + model.input_sizes[i+1], num_classes)
     training_metrics = Metrics({'dataset_batches': len(train_dataset_loader),
                                 'loss': [], 'accuracy': [], 
                                 'accuracy_top5': [], 'steps/sec': []})
@@ -638,16 +655,16 @@ def train(model, train_dataset_loader, eval_dataset_loader,
                 inputs, labels = batch
             else:
                 inputs, labels, _ = batch
-            if inputs.shape[0] != train_dataset_loader.batch_size:
+            if inputs.shape[0] != batch_size:
                 continue
             inputs, labels = Variable(inputs), Variable(labels)
             if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
             if isinstance(model, ToyNet):
                 try:
-                    inputs = inputs.view(train_dataset_loader.batch_size, 784)
+                    inputs = inputs.view(batch_size, 784)
                 except RuntimeError:
-                    inputs = inputs.view(train_dataset_loader.batch_size, 15)
+                    inputs = inputs.view(batch_size, 15)
             if i % 10 == 1:
                 model.eval()
                 outputs = model(inputs)
@@ -701,6 +718,9 @@ def train(model, train_dataset_loader, eval_dataset_loader,
                                       torch.std(param.grad.data)))
                     optimizer.step()
             else:
+                if args.target_momentum:
+                    for activation in activations:
+                        activation.batch_labels = targets
                 optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = loss_function(outputs, targets)
@@ -718,9 +738,10 @@ def train(model, train_dataset_loader, eval_dataset_loader,
 def evaluate(model, dataset_loader, loss_function, 
              eval_metrics, log=True, use_gpu=True):
     model.eval()
+    batch_size = dataset_loader.batch_size
     total_loss, total_accuracy, total_accuracy_top5 = 0, 0, 0
     for inputs, labels in dataset_loader:
-        if inputs.shape[0] != dataset_loader.batch_size:
+        if inputs.shape[0] != batch_size:
             continue
         inputs = Variable(inputs, volatile=True)
         labels = Variable(labels, volatile=True)
@@ -728,9 +749,9 @@ def evaluate(model, dataset_loader, loss_function,
             inputs, labels = inputs.cuda(), labels.cuda()
         if isinstance(model, ToyNet):
             try:
-                inputs = inputs.view(dataset_loader.batch_size, 784)
+                inputs = inputs.view(batch_size, 784)
             except RuntimeError:
-                inputs = inputs.view(dataset_loader.batch_size, 15)
+                inputs = inputs.view(batch_size, 15)
         outputs = model(inputs)
         loss = loss_function(outputs, labels).data[0]
         total_loss += loss
@@ -996,7 +1017,7 @@ class StepF(Function):
                     input_, go, None, self.make01, velocity=momentum_tensor.float(), 
                     momentum_factor=self.momentum_factor, return_target=True)
                 self.momentum_state[range(self.batch_labels.shape[0]), 
-                                    self.batch_labels] = self.target
+                                    self.batch_labels] = self.target.long()
             else:
                 grad_input, self.target = tp_grad_func(
                     input_, go, self.target, self.make01)
@@ -1036,6 +1057,8 @@ class Step(nn.Module):
     def initialize_momentum_state(self, target_shape, num_classes):
         self.momentum_state = torch.zeros(
             target_shape[0], num_classes, *target_shape[1:]).type(torch.LongTensor)
+        self.momentum_state = self.momentum_state.cuda()
+        self.function.momentum_state = self.momentum_state
 
     def forward(self, x):
         self.momentum_state = self.function.momentum_state
