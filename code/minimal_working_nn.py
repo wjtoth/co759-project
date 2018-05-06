@@ -2,11 +2,11 @@
 import os
 import sys
 import argparse
+import random
 import numpy as np
 from functools import partial
 from itertools import chain
 from time import time
-from random import randint
 from collections import OrderedDict
 
 # pytorch
@@ -421,7 +421,7 @@ class Neighbourhood_Iterator:
             Returning [] indicates there are no more neighbours to explore"""
         raise NotImplementedError
 
-import random
+
 class Random_Neighbourhood_Iterator(Neighbourhood_Iterator):
     def __init__(self, dimension, samples):
         super().__init__(dimension)
@@ -476,8 +476,8 @@ class Target:
             self.values.zero_()
         
     def crossover(self, parent1, parent2):
-        x0 = randint(1, self.size[0]-2)
-        y0 = randint(1, self.size[1]-2)
+        x0 = random.randint(1, self.size[0]-2)
+        y0 = random.randint(1, self.size[1]-2)
            
         self.values[:x0,:y0] = parent1.values[:x0,:y0] 
         self.values[x0+1:,:y0] = parent1.values[x0+1:,:y0] 
@@ -523,8 +523,8 @@ class GeneticOptimizer(TargetPropOptimizer):
                 # some other condition for crossing two targets could be used here
                 c1, c2 = None, None
                 while c1 == c2:
-                    c1 = randint(0, self.parents-1)
-                    c2 = randint(0, self.parents-1)
+                    c1 = random.randint(0, self.parents-1)
+                    c2 = random.randint(0, self.parents-1)
                 child_candidate = Target(
                     candidate_size, random=False, use_gpu=self.use_gpu)
                 child_candidate.crossover(population[c1], population[c2])          
