@@ -200,7 +200,7 @@ def main():
             if args.comb_opt_method == 'local_search':
                 target_optimizer = partial(
                     LocalSearchOptimizer, batch_size=args.batch, 
-                    candidates=10, iterations=10)
+                    perturb_size=5000, candidates=64, iterations=10, searches=1)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -298,92 +298,11 @@ class TargetPropOptimizer:
         """
         raise NotImplementedError
 
-    def step(self, train_step, module_index, target, input=None, 
-             label=None, base_targets=None):
-        return self.generate_targets(train_step, module_index, input, 
-                                     label, target, base_targets)
-
-
-class LocalSearchOptimizer(TargetPropOptimizer):
-
-    def __init__(self, modules, sizes, loss_functions, batch_size, candidates=10, 
-                 iterations=10, searches=1, state=[], use_gpu=True):
-        super().__init__(modules, sizes, loss_functions, batch_size, state, use_gpu)
-        self.candidates = candidates
-        self.iterations = iterations
-        self.searches = searches
-
-    @staticmethod
-    def boxflip(candidate, y0, y1):
-        candidate[:,y0:y1] = -candidate[:,y0:y1]     
-        return candidate
-
-    def generate_candidate(self, module_index, target, train_step):
-        loss_function = self.loss_functions[module_index]
-        module = self.modules[module_index]
-        if module_index > 0:
-            target = target.float()
-            loss_function = partial(soft_hinge_loss, reduce_=False)
-
-        # Generate a candidate target
-        if self.use_gpu:
-            candidate = torch.cuda.FloatTensor(*self.sizes[module_index])
-        else:
-            candidate = torch.FloatTensor(*self.sizes[module_index])
-        candidate.random_(0,2)
-        candidate.mul_(2)
-        candidate.add_(-1)
-
-        # Local search to find candidates
-        perturb_size = candidate.shape[1] // self.candidates
-        for k in range(0, self.iterations):
-            samples = candidate.shape[1] // 10
-            prob_dist = Random_Neighbourhood_Iterator(self.sizes[module_index], samples)
-            flip_list = prob_dist.next()
-            
-            candidates = [candidate.clone()]
-            while flip_list != []:
-                for (x,y) in flip_list:
-                    #do flip
-                    candidate[x,y]=-candidate[x,y]
-                    #append new candidate
-                    candidates.append(candidate.clone())
-                    #print(len(candidates))
-                    if len(candidates) >= 64:#batch size (TODO parameterize)
-                        candidate_losses = self.evaluate_targets(
-                            module, module_index, loss_function, target, candidates)
-                        candidate_index, loss = self.choose_target(candidate_losses)
-                        opt_candidate = candidates[candidate_index.data[0]]
-                        candidates = [opt_candidate]
-                    #undo flip
-                    candidate[x,y]=-candidate[x,y]
-                flip_list = prob_dist.next()
-
-           #TODO make this a function?
-            candidate_losses = self.evaluate_targets(
-                module, module_index, loss_function, target, candidates)
-            candidate_index, loss = self.choose_target(candidate_losses)
-            candidate = candidates[candidate_index.data[0]]
-
-        if self.use_gpu:
-            candidate_var = Variable(candidate).cuda()
-        else:
-            candidate_var = Variable(candidate)
-        self.state["candidates"].append((candidate_var.long(), loss))
-
-    def generate_targets(self, train_step, module_index, 
-                         input, label, target, base_targets=None):
-        self.state = {"candidates": []}
-        for i in range(0, self.searches):
-            self.generate_candidate(module_index, target, train_step)
-        index, loss = self.choose_target(
-            [loss for candidate, loss in self.state["candidates"]])
-        if train_step % 50 == 1:
-            print("Chosen target loss:", loss.data[0])
-        return self.state["candidates"][index][0], loss
-
     def evaluate_targets(self, module, module_index, loss_function, target, candidates):
-        candidate_batch = torch.stack(candidates)
+        if torch.is_tensor(candidates):
+            candidate_batch = candidates
+        else:
+            candidate_batch = torch.stack(candidates)
         target_batch = torch.stack([target]*len(candidates))
         candidate_batch = candidate_batch.view(
             candidate_batch.shape[0]*candidate_batch.shape[1], 
@@ -401,6 +320,90 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         losses = loss_function(output, target_batch)
         losses = losses.view(len(candidates), int(np.prod(target.shape)))
         return losses.mean(dim=1)  # mean everything but candidate batch dim
+
+    def step(self, train_step, module_index, target, input=None, 
+             label=None, base_targets=None):
+        return self.generate_targets(train_step, module_index, input, 
+                                     label, target, base_targets)
+
+
+def generate_neighborhood(base_tensor, masking_weights, size, radius):
+    """
+    Args:
+        base_tensor: torch.LongTensor; base tensor whose 
+            neighborhood is generated.
+        masking_weights: torch.FloatTensor; weights for randomly sampling 
+            indices to perturb. 
+        size: Int; size of the neighborhood, that is, the number of 
+            tensors to generate. 
+        radius: Int; (expected) number of values to perturb in 
+            generating each neighbor. 
+    Returns:
+        A total of 'size' randomly-generated neighbors of base_tensor. 
+    """
+    batch_mask = torch.stack([masking_weights]*size)
+    batch_base = torch.stack([base_tensor]*size)
+    sampling_prob = radius / base_tensor.numel()
+    one_tensor = torch.ones(batch_base.shape, device=torch.device("cuda:0"))
+    indices = torch.bernoulli(one_tensor*sampling_prob)
+    sampling_mask = indices.float() * batch_mask
+    indices = torch.bernoulli(sampling_mask)
+    neighbourhood = batch_base * (indices*-2 + 1)
+    return neighbourhood
+
+
+class LocalSearchOptimizer(TargetPropOptimizer):
+
+    def __init__(self, modules, sizes, loss_functions, batch_size, perturb_size=50, 
+                 candidates=50, iterations=10, searches=1, state=[], use_gpu=True):
+        super().__init__(modules, sizes, loss_functions, batch_size, state, use_gpu)
+        self.perturb_size = perturb_size
+        self.candidates = candidates
+        self.iterations = iterations
+        self.searches = searches
+
+    def find_candidate(self, module_index, target, train_step):
+        loss_function = self.loss_functions[module_index]
+        module = self.modules[module_index]
+        if module_index > 0:
+            target = target.float()
+            loss_function = partial(soft_hinge_loss, reduce_=False)
+
+        # Generate a random candidate target
+        if self.use_gpu:
+            candidate = torch.cuda.FloatTensor(*self.sizes[module_index])
+        else:
+            candidate = torch.FloatTensor(*self.sizes[module_index])
+        candidate.random_(0,2)
+        candidate.mul_(2)
+        candidate.add_(-1)
+
+        # Local search to find better candidate
+        masking_weights = torch.ones(candidate.shape, device=torch.device("cuda:0"))
+        for k in range(0, self.iterations):
+            candidates = generate_neighborhood(
+                candidate, masking_weights, self.candidates, self.perturb_size)
+            candidate_losses = self.evaluate_targets(
+                module, module_index, loss_function, target, candidates)
+            candidate_index, loss = self.choose_target(candidate_losses)
+            candidate = candidates[candidate_index.data[0]]
+
+        if self.use_gpu:
+            candidate_var = Variable(candidate).cuda()
+        else:
+            candidate_var = Variable(candidate)
+        self.state["candidates"].append((candidate_var.long(), loss))
+
+    def generate_targets(self, train_step, module_index, 
+                         input, label, target, base_targets=None):
+        self.state = {"candidates": []}
+        for i in range(0, self.searches):
+            self.find_candidate(module_index, target, train_step)
+        index, loss = self.choose_target(
+            [loss for candidate, loss in self.state["candidates"]])
+        if train_step % 50 == 1:
+            print("Chosen target loss:", loss.data[0])
+        return self.state["candidates"][index][0], loss
     
     def choose_target(self, losses):
         if isinstance(losses, list):
@@ -411,24 +414,29 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         return candidate_index, loss
 
 
-class Neighbourhood_Iterator:
+class NeighbourhoodIterator:
+    
     def __init__(self, dimensions):
         self.dimensions = dimensions
 
-    def next():
-        """ Returns a list of coordinates to flip for next
-            point in neighbourhood to explore.
-            Returning [] indicates there are no more neighbours to explore"""
+    def next(self):
+        """
+        Should return a list of coordinates to flip for next point 
+        in neighbourhood to explore. Returning [] indicates 
+        there are no more neighbours to explore.
+        """
         raise NotImplementedError
 
 
-class Random_Neighbourhood_Iterator(Neighbourhood_Iterator):
+class RandomNeighbourhoodIterator(NeighbourhoodIterator):
+
     def __init__(self, dimension, samples):
         super().__init__(dimension)
         self.samples = samples
         self.x_size = self.dimensions[0]
         self.y_size = self.dimensions[1]
         self.sample_count = 0
+
     def next(self):
         x = random.randrange(self.x_size)
         y = random.randrange(self.y_size)
@@ -437,7 +445,9 @@ class Random_Neighbourhood_Iterator(Neighbourhood_Iterator):
             return [(x,y)]
         return []
 
-class Complete_Neighbourhood_Iterator(Neighbourhood_Iterator):
+
+class CompleteNeighbourhoodIterator(NeighbourhoodIterator):
+
     def __init__(self, dimensions):
         super().__init__(dimensions)
         self.x_size = self.dimensions[0]
@@ -447,9 +457,11 @@ class Complete_Neighbourhood_Iterator(Neighbourhood_Iterator):
         self.first_next = True
 
     def next(self):
-        """ Returns a list of coordinates to flip for next
-            point in neighbourhood to explore.
-            Returning [] indicates there are no more neighbours to explore"""
+        """
+        Returns a list of coordinates to flip for next point 
+        in neighbourhood to explore. Returning [] indicates 
+        there are no more neighbours to explore.
+        """
         self.y = (self.y + 1) % self.y_size
         if self.y == 0:
             self.x = (self.x + 1) % self.x_size
@@ -458,6 +470,7 @@ class Complete_Neighbourhood_Iterator(Neighbourhood_Iterator):
                 return []
             self.first_next = False
         return [(self.x, self.y)]
+
 
 class Target:
 
@@ -548,26 +561,6 @@ class GeneticOptimizer(TargetPropOptimizer):
         index, loss = self.choose_target(
             [loss for candidate, loss in self.state["candidates"]])
         return self.state["candidates"][index][0], loss
-
-    def evaluate_targets(self, module, module_index, loss_function, target, candidates):
-        candidate_batch = torch.stack(candidates)
-        target_batch = torch.stack([target]*len(candidates))
-        candidate_batch = candidate_batch.view(
-            candidate_batch.shape[0]*candidate_batch.shape[1], 
-            *candidate_batch.shape[2:])
-        target_batch = target_batch.view(
-                target_batch.shape[0]*target_batch.shape[1], 
-                *target_batch.shape[2:])
-        if self.use_gpu:
-            candidate_var = Variable(candidate_batch).cuda()
-        else:
-            candidate_var = Variable(candidate_batch)
-        output = module(candidate_var)
-        if module_index > 0:
-            output = output.view_as(target_batch)
-        losses = loss_function(output, target_batch)
-        losses = losses.view(len(candidates), int(np.prod(target.shape)))
-        return losses.mean(dim=1)  # mean everything but candidate batch dim
 
     def filter_targets(self, candidates, losses):
         for i in range(losses.shape[0]):
