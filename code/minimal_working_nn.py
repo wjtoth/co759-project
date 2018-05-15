@@ -200,7 +200,7 @@ def main():
             if args.comb_opt_method == 'local_search':
                 target_optimizer = partial(
                     LocalSearchOptimizer, batch_size=args.batch, 
-                    perturb_size=5000, candidates=64, iterations=10, searches=1)
+                    perturb_size=500, candidates=64, iterations=10, searches=1)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -659,43 +659,30 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 except RuntimeError:
                     inputs = inputs.view(batch_size, 15)
             if i % 10 == 1:
-                model.eval()
-                outputs = model(inputs)
-                loss = loss_function(outputs, labels)
-                batch_accuracy = accuracy(outputs, labels)
-                if isinstance(model, ToyNet):
-                    batch_accuracy_top5 = 0
-                else:
-                    batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5)
-                if i == 1:
-                    steps = 1
-                else:
-                    steps = 10
-                current_time = time()
-                steps_per_sec = steps/(current_time-last_time)
-                metric_tuple = (('loss', loss.data[0]), ('accuracy', batch_accuracy), 
-                                ('accuracy_top5', batch_accuracy_top5), 
-                                ('steps/sec', steps_per_sec))
-                training_metrics.append(metric_tuple)
-                print('training --- epoch: %d, batch: %d, loss: %.3f, acc: %.3f, '
-                      'acc_top5: %.3f, steps/sec: %.2f' 
-                      % (epoch+1, i+1, loss.data[0], batch_accuracy, 
-                         batch_accuracy_top5, steps_per_sec))
-                last_time = current_time
-                model.train()
+                last_time = eval_step(model, inputs, labels, loss_function, 
+                                      training_metrics, epoch, i, last_time)
             train_step = epoch*len(train_dataset_loader) + i
             targets = labels
             if train_per_layer:
-                layer_outputs = []
+                # Obtain activations / hidden states
+                activations = []
+                for j, (module, _) in enumerate(modules[::-1]):
+                    if j == 0:
+                        outputs = module(inputs)
+                    else:
+                        outputs = module(model.all_activations[j-1](outputs.detach()))
+                    activations.append(outputs)
+                activations.reverse()
+                # Then target prop in reverse mode
                 for j, (module, optimizer) in enumerate(modules):
                     optimizer.zero_grad()
-                    if j == len(modules)-1:
-                        # no target generation at initial layer/module
-                        outputs = module(inputs)
-                        loss = soft_hinge_loss(outputs, targets.float()).mean()
+                    outputs = activations[j]
+                    if j == 0:
+                        loss = loss_function(outputs, targets).mean()
                     else:
-                        targets, loss = target_optimizer.step(
-                            train_step, j, targets, label=labels)
+                        loss = soft_hinge_loss(outputs, targets.float()).mean()
+                    targets, _ = target_optimizer.step(
+                        train_step, j, targets, label=labels)
                     loss.backward()
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
@@ -726,6 +713,35 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                  eval_metrics, log=True, use_gpu=use_gpu)
         store_checkpoint(model, optimizer, args, training_metrics, 
                          eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
+
+
+def eval_step(model, inputs, labels, loss_function, 
+              training_metrics, epoch, batch, last_step_time):
+    model.eval()
+    outputs = model(inputs)
+    loss = loss_function(outputs, labels)
+    batch_accuracy = accuracy(outputs, labels)
+    if isinstance(model, ToyNet):
+        batch_accuracy_top5 = 0
+    else:
+        batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5)
+    if batch == 1:
+        steps = 1
+    else:
+        steps = 10
+    current_time = time()
+    steps_per_sec = steps/(current_time-last_step_time)
+    metric_tuple = (('loss', loss.data[0]), ('accuracy', batch_accuracy), 
+                    ('accuracy_top5', batch_accuracy_top5), 
+                    ('steps/sec', steps_per_sec))
+    training_metrics.append(metric_tuple)
+    print('training --- epoch: %d, batch: %d, loss: %.3f, acc: %.3f, '
+          'acc_top5: %.3f, steps/sec: %.2f' 
+          % (epoch+1, batch+1, loss.data[0], batch_accuracy, 
+             batch_accuracy_top5, steps_per_sec))
+    last_step_time = current_time
+    model.train()
+    return last_step_time
 
 
 def evaluate(model, dataset_loader, loss_function, 
@@ -845,7 +861,7 @@ class ToyNet(nn.Module):
                  separate_activations=True, num_classes=10):
         super().__init__()
         self.input_size = input_shape[0]
-        self.fc1_size = 10
+        self.fc1_size = 100
         self.separate_activations = separate_activations
 
         self.input_sizes = [list(input_shape), [self.fc1_size]]
@@ -899,7 +915,7 @@ class ConvNet4(nn.Module):
             list(input_shape), 
             [self.conv1_size, (input_shape[1]//4)*(input_shape[2]//4)//4 + 1, 
              self.conv2_size//4 + 1], 
-            [(input_shape[1] // 4) * (input_shape[2] // 4) * self.conv2_size], 
+            [self.conv2_size, input_shape[1] // 4, input_shape[2] // 4], 
             [self.fc1_size],
         ]
 
