@@ -274,7 +274,7 @@ class TargetPropOptimizer:
         self.modules = modules
         self.sizes = [[batch_size] + shape for shape in sizes]
         self.loss_functions = loss_functions
-        self.state = list(state)
+        self.state = {}
         self.use_gpu = use_gpu
 
     def generate_targets(self, train_step, module_index, input, 
@@ -308,8 +308,8 @@ class TargetPropOptimizer:
             candidate_batch.shape[0]*candidate_batch.shape[1], 
             *candidate_batch.shape[2:])
         target_batch = target_batch.view(
-                target_batch.shape[0]*target_batch.shape[1], 
-                *target_batch.shape[2:])
+            target_batch.shape[0]*target_batch.shape[1], 
+            *target_batch.shape[2:])
         if self.use_gpu:
             candidate_var = Variable(candidate_batch).cuda()
         else:
@@ -352,6 +352,18 @@ def generate_neighborhood(base_tensor, masking_weights, size, radius):
     return neighbourhood
 
 
+def get_random_tensor(shape, make01=False, use_gpu=True):
+    if use_gpu:
+        candidate = torch.cuda.FloatTensor(*shape)
+    else:
+        candidate = torch.FloatTensor(*shape)
+    candidate.random_(0,2)
+    if not make01:
+        candidate.mul_(2)
+        candidate.add_(-1)
+    return candidate
+
+
 class LocalSearchOptimizer(TargetPropOptimizer):
 
     def __init__(self, modules, sizes, loss_functions, batch_size, perturb_size=50, 
@@ -361,48 +373,68 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         self.candidates = candidates
         self.iterations = iterations
         self.searches = searches
+        self.state = {"chosen_groups": []}
 
-    def find_candidate(self, module_index, target, train_step):
+    def find_candidate(self, module_index, target, train_step, base_candidates=None):
         loss_function = self.loss_functions[module_index]
         module = self.modules[module_index]
         if module_index > 0:
             target = target.float()
             loss_function = partial(soft_hinge_loss, reduce_=False)
 
-        # Generate a random candidate target
-        if self.use_gpu:
-            candidate = torch.cuda.FloatTensor(*self.sizes[module_index])
-        else:
-            candidate = torch.FloatTensor(*self.sizes[module_index])
-        candidate.random_(0,2)
-        candidate.mul_(2)
-        candidate.add_(-1)
+        candidates = base_candidates
+        for i, [candidate, weight, perturb_size] in enumerate(candidates.copy()):
+            candidates[i][1] = round(self.candidates*weight)
+            if candidate is None:
+                candidates[i][0] = get_random_tensor(
+                    self.sizes[module_index], use_gpu=self.use_gpu)
+            if perturb_size is None:
+                candidates[i][2] = self.perturb_size
+        candidates = [candidate_tuple for candidate_tuple in candidates 
+                      if round(self.candidates*candidate_tuple[1])]
 
         # Local search to find better candidate
-        masking_weights = torch.ones(candidate.shape, device=torch.device("cuda:0"))
-        for k in range(0, self.iterations):
-            candidates = generate_neighborhood(
-                candidate, masking_weights, self.candidates, self.perturb_size)
+        masking_weights = torch.ones(
+            candidates[0][0].shape, device=torch.device("cuda:0"))
+        for i in range(self.iterations):
+            neighbors = []
+            for [candidate, nbhd_size, perturb_size] in candidates:
+                if nbhd_size == 0:
+                    raise RuntimeError("Neighborhood size should be nonzero!")
+                else:
+                    neighbors.append(generate_neighborhood(
+                        candidate, masking_weights, nbhd_size, perturb_size))
+            nbhd_sizes = [size for _, size, _ in candidates]
+            candidate_batch = torch.cat(neighbors)
             candidate_losses = self.evaluate_targets(
-                module, module_index, loss_function, target, candidates)
-            candidate_index, loss = self.choose_target(candidate_losses)
-            candidate = candidates[candidate_index.data[0]]
+                module, module_index, loss_function, target, candidate_batch)
+            candidate_losses = torch.split(candidate_losses, nbhd_sizes)
+            candidate_groups = torch.split(candidate_batch, nbhd_sizes)
+            chosen_candidates, chosen_losses = [], []
+            for j, (losses, candidate_group) in enumerate(
+                    zip(candidate_losses, candidate_groups)):
+                candidate_index, loss = self.choose_target(losses)
+                candidate = candidate_group[candidate_index.data[0]]
+                chosen_candidates.append(
+                    [candidate, candidates[j][1], candidates[j][2]])
+                chosen_losses.append(loss)
+            candidates = chosen_candidates
 
-        if self.use_gpu:
-            candidate_var = Variable(candidate).cuda()
-        else:
-            candidate_var = Variable(candidate)
-        self.state["candidates"].append((candidate_var.long(), loss))
+        for [candidate, _, _], loss in zip(candidates, chosen_losses):
+            if self.use_gpu:
+                candidate_var = Variable(candidate).cuda()
+            else:
+                candidate_var = Variable(candidate)
+            self.state["candidates"].append((candidate_var.long(), loss))
 
     def generate_targets(self, train_step, module_index, 
                          input, label, target, base_targets=None):
-        self.state = {"candidates": []}
-        for i in range(0, self.searches):
-            self.find_candidate(module_index, target, train_step)
+        self.state["candidates"] = []
+        for i in range(self.searches):
+            self.find_candidate(module_index, target, train_step, base_targets)
         index, loss = self.choose_target(
             [loss for candidate, loss in self.state["candidates"]])
-        if train_step % 50 == 1:
-            print("Chosen target loss:", loss.data[0])
+        self.state["chosen_groups"].append(index)
         return self.state["candidates"][index][0], loss
     
     def choose_target(self, losses):
@@ -681,9 +713,14 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         loss = loss_function(outputs, targets).mean()
                     else:
                         loss = soft_hinge_loss(outputs, targets.float()).mean()
-                    targets, _ = target_optimizer.step(
-                        train_step, j, targets, label=labels)
                     loss.backward()
+                    optimizer.step()
+                    if j != len(modules)-1:
+                        activation = model.all_activations[len(modules)-1-j-1](
+                            activations[j+1].detach())
+                        targets, _ = target_optimizer.step(
+                            train_step, j, targets, label=labels, 
+                            base_targets=[[None, 0.5, 500], [activation, 0.5, 2000]])
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
@@ -696,7 +733,6 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                                       '{1:.8f}, {2:.8f}\n'.format(
                                       layer, torch.mean(param.grad.data), 
                                       torch.std(param.grad.data)))
-                    optimizer.step()
             else:
                 if args.target_momentum:
                     for activation in activations:
@@ -713,6 +749,9 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                  eval_metrics, log=True, use_gpu=use_gpu)
         store_checkpoint(model, optimizer, args, training_metrics, 
                          eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
+        if target_optimizer is not None:
+            print(sum(target_optimizer.state["chosen_groups"][
+                      -len(train_dataset_loader):])/len(train_dataset_loader), "\n")
 
 
 def eval_step(model, inputs, labels, loss_function, 
