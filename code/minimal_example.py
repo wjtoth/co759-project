@@ -347,9 +347,14 @@ def generate_neighborhood(base_tensor, masking_weights, size, radius):
     sampling_prob = radius / base_tensor.numel()
     one_tensor = torch.ones(batch_base.shape)
     one_tensor = one_tensor.cuda()
+    print("1", one_tensor)
     indices = torch.bernoulli(one_tensor*sampling_prob)
+    print("2", indices)
     sampling_mask = indices.float() * batch_mask
+    print("3", sampling_mask)
     indices = torch.bernoulli(sampling_mask)
+    print("4", batch_base)
+    print("5", indices)
     neighbourhood = batch_base * (indices*-2 + 1)
     return neighbourhood
 
