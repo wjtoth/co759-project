@@ -370,6 +370,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
     def __init__(self, modules, sizes, loss_functions, batch_size, perturb_size=50, 
                  candidates=50, iterations=10, searches=1, state=[], use_gpu=True):
         super().__init__(modules, sizes, loss_functions, batch_size, state, use_gpu)
+        print(self.use_gpu)
         self.perturb_size = perturb_size
         self.candidates = candidates
         self.iterations = iterations
