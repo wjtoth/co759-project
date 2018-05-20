@@ -344,7 +344,8 @@ def generate_neighborhood(base_tensor, masking_weights, size, radius):
     batch_mask = torch.stack([masking_weights]*size)
     batch_base = torch.stack([base_tensor]*size)
     sampling_prob = radius / base_tensor.numel()
-    one_tensor = torch.ones(batch_base.shape, device=torch.device("cuda:0"))
+    one_tensor = torch.ones(batch_base.shape)
+    one_tensor = one_tensor.cuda()
     indices = torch.bernoulli(one_tensor*sampling_prob)
     sampling_mask = indices.float() * batch_mask
     indices = torch.bernoulli(sampling_mask)
@@ -394,8 +395,8 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                       if round(self.candidates*candidate_tuple[1])]
 
         # Local search to find better candidate
-        masking_weights = torch.ones(
-            candidates[0][0].shape, device=torch.device("cuda:0"))
+        masking_weights = torch.ones(candidates[0][0].shape)
+        masking_weights = masking_weights.cuda()
         for i in range(self.iterations):
             neighbors = []
             for [candidate, nbhd_size, perturb_size] in candidates:
