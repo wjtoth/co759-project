@@ -341,6 +341,7 @@ def generate_neighborhood(base_tensor, masking_weights, size, radius):
     Returns:
         A total of 'size' randomly-generated neighbors of base_tensor. 
     """
+    print(base_tensor)
     batch_mask = torch.stack([masking_weights]*size)
     batch_base = torch.stack([base_tensor]*size)
     sampling_prob = radius / base_tensor.numel()
