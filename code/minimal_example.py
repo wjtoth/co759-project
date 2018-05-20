@@ -396,7 +396,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
 
         # Local search to find better candidate
         masking_weights = torch.ones(candidates[0][0].shape)
-        masking_weights = masking_weights.cuda()
+        masking_weights = Variable(masking_weights).cuda()
         for i in range(self.iterations):
             neighbors = []
             for [candidate, nbhd_size, perturb_size] in candidates:
