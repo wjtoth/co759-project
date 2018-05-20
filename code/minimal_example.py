@@ -341,20 +341,14 @@ def generate_neighborhood(base_tensor, masking_weights, size, radius):
     Returns:
         A total of 'size' randomly-generated neighbors of base_tensor. 
     """
-    print(base_tensor)
     batch_mask = torch.stack([masking_weights]*size)
     batch_base = torch.stack([base_tensor]*size)
     sampling_prob = radius / base_tensor.numel()
     one_tensor = torch.ones(batch_base.shape)
-    one_tensor = one_tensor.cuda()
-    print("1", one_tensor)
+    one_tensor = Variable(one_tensor).cuda()
     indices = torch.bernoulli(one_tensor*sampling_prob)
-    print("2", indices)
     sampling_mask = indices.float() * batch_mask
-    print("3", sampling_mask)
     indices = torch.bernoulli(sampling_mask)
-    print("4", batch_base)
-    print("5", indices)
     neighbourhood = batch_base * (indices*-2 + 1)
     return neighbourhood
 
@@ -376,7 +370,6 @@ class LocalSearchOptimizer(TargetPropOptimizer):
     def __init__(self, modules, sizes, loss_functions, batch_size, perturb_size=50, 
                  candidates=50, iterations=10, searches=1, state=[], use_gpu=True):
         super().__init__(modules, sizes, loss_functions, batch_size, state, use_gpu)
-        print(self.use_gpu)
         self.perturb_size = perturb_size
         self.candidates = candidates
         self.iterations = iterations
