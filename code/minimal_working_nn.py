@@ -202,8 +202,9 @@ def main():
                     "Discrete opt methods currently only support nonlin = step11.")
             if args.comb_opt_method == 'local_search':
                 target_optimizer = partial(
-                    LocalSearchOptimizer, batch_size=args.batch, criterion="loss",
-                    perturb_size=1000, candidates=64, iterations=10, searches=1)
+                    LocalSearchOptimizer, batch_size=args.batch, 
+                    criterion="loss", perturb_size=1000, candidates=64, 
+                    iterations=10, searches=1, search_type="beam")
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -417,15 +418,16 @@ def get_random_tensor(shape, make01=False, use_gpu=True):
 class LocalSearchOptimizer(TargetPropOptimizer):
 
     def __init__(self, *args, perturb_size=50, candidates=50, 
-                 iterations=10, searches=1, **kwargs):
+                 iterations=10, searches=1, search_type="beam", **kwargs):
         super().__init__(*args, **kwargs)
         self.perturb_size = perturb_size
         self.candidates = candidates
         self.iterations = iterations
         self.searches = searches
+        self.search_type = search_type
         self.state = {"chosen_groups": []}
 
-    def find_candidate(self, module_index, target, train_step, base_candidates=None):
+    def find_candidates(self, module_index, target, train_step, base_candidates=None):
         loss_function = self.loss_functions[module_index]
         module = self.modules[module_index]
         if module_index > 0:
@@ -459,16 +461,29 @@ class LocalSearchOptimizer(TargetPropOptimizer):
             candidate_batch = torch.cat(neighbors)
             candidate_losses = self.evaluate_targets(
                 module, module_index, loss_function, target, candidate_batch)
-            candidate_losses = torch.split(candidate_losses, nbhd_sizes)
-            candidate_groups = torch.split(candidate_batch, nbhd_sizes)
+            if self.search_type == "beam":
+                candidate_losses = [candidate_losses]
+                candidate_groups = [candidate_batch]
+            else:
+                candidate_losses = torch.split(candidate_losses, nbhd_sizes)
+                candidate_groups = torch.split(candidate_batch, nbhd_sizes)
             chosen_candidates, chosen_losses = [], []
             for j, (losses, candidate_group) in enumerate(
                     zip(candidate_losses, candidate_groups)):
-                candidate_index, loss = self.choose_target(losses)
-                candidate = candidate_group[candidate_index.data[0]]
-                chosen_candidates.append(
-                    [candidate, candidates[j][1], candidates[j][2]])
-                chosen_losses.append(loss)
+                k = len(candidates) if self.search_type == "beam" else 1
+                candidate_indices, losses = self.choose_target(losses, k)
+                best_candidates = candidate_group[candidate_indices]
+                if self.search_type == "beam":
+                    best_candidates = [
+                        [candidate.squeeze(0), candidates[j][1], candidates[j][2]] 
+                         for j, candidate in enumerate(best_candidates.chunk(k))]
+                else:
+                    best_candidates = [[best_candidates.squeeze(0), 
+                                        candidates[j][1], candidates[j][2]]]
+                chosen_candidates.extend(best_candidates)
+                chosen_losses.extend(
+                    [loss.squeeze(0) for loss in losses.chunk(k)] 
+                    if self.search_type == "beam" else [losses.squeeze(0)])
             candidates = chosen_candidates
 
         for [candidate, _, _], loss in zip(candidates, chosen_losses):
@@ -482,19 +497,24 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                          input, label, target, base_targets=None):
         self.state["candidates"] = []
         for i in range(self.searches):
-            self.find_candidate(module_index, target, train_step, base_targets)
+            self.find_candidates(module_index, target, train_step, base_targets)
         index, loss = self.choose_target(
             [loss for candidate, loss in self.state["candidates"]])
-        self.state["chosen_groups"].append(index)
+        if self.search_type == "parallel":
+            self.state["chosen_groups"].append(index)
         return self.state["candidates"][index][0], loss
     
-    def choose_target(self, losses):
+    def choose_target(self, losses, k=1):
         if isinstance(losses, list):
-            candidate_index, loss = min(
+            if k != 1:
+                raise NotImplementedError("Top-k element retrieval with k > 1 "
+                                          "not implemented for lists.")
+            candidate_indices, losses = min(
                 enumerate(losses), key=lambda element: element[1].data[0])
         else:
-            loss, candidate_index =  torch.min(losses, 0)
-        return candidate_index, loss
+            losses, candidate_indices = torch.topk(
+                losses, k, dim=0, largest=False, sorted=False)
+        return candidate_indices, losses
 
 
 class NeighbourhoodIterator:
@@ -757,7 +777,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                             activations[j+1].detach())
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, label=labels, 
-                            base_targets=[[None, 1, 350]])
+                            base_targets=[[None, 1/4, 500] for i in range(4)])
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
