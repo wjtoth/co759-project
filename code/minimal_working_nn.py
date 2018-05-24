@@ -6,8 +6,8 @@ import random
 import numpy as np
 from functools import partial
 from itertools import chain
-from time import time
-from collections import OrderedDict
+from time import time, sleep
+from collections import OrderedDict, Counter
 
 # pytorch
 import torch
@@ -26,6 +26,7 @@ import targetprop as tp
 from datasets import create_datasets
 from models.convnet8 import ConvNet8
 from util.reshapemodule import ReshapeBatch
+from util.tensorboardlogger import TensorBoardLogger
 
 # ours
 import adversarial
@@ -180,6 +181,8 @@ def main():
     if args.cuda:
         network = network.cuda()
 
+    tb_logger = TensorBoardLogger('new_logs')
+
     if args.no_train:
         print('Loading from last checkpoint...')
         checkpoint_state = load_checkpoint(
@@ -199,8 +202,8 @@ def main():
                     "Discrete opt methods currently only support nonlin = step11.")
             if args.comb_opt_method == 'local_search':
                 target_optimizer = partial(
-                    LocalSearchOptimizer, batch_size=args.batch, 
-                    perturb_size=500, candidates=64, iterations=10, searches=1)
+                    LocalSearchOptimizer, batch_size=args.batch, criterion="loss",
+                    perturb_size=1000, candidates=64, iterations=10, searches=1)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -212,7 +215,7 @@ def main():
 
         train(network, train_loader, val_loader, criterion, optimizer, 
               args.epochs, num_classes, target_optimizer=target_optimizer, 
-              use_gpu=args.cuda, args=args, print_param_info=False)
+              logger=tb_logger, use_gpu=args.cuda, args=args, print_param_info=False)
         print('Finished training\n')
 
     if args.adv_eval:
@@ -267,14 +270,51 @@ def soft_hinge_loss(z, t, xscale=1.0, yscale=1.0, reduce_=True):
     return loss
 
 
+def accuracy(prediction, target, average=True):
+    if prediction.dim() == target.dim():
+        accuracies = 100 * prediction.eq(target).float()
+    else:
+        accuracies = 100 * prediction.max(dim=1)[1].eq(target).float()
+    if average:
+        accuracy = accuracies.mean()
+    else:
+        accuracy = accuracies
+    return accuracy
+
+
+def accuracy_topk(prediction, target, k=5, average=True):
+    _, predictions_topk = torch.topk(prediction, k, dim=1, largest=True)
+    accuracy_topk = 100 * (predictions_topk 
+        == target.unsqueeze(1)).max(dim=1)[0].float()
+    if average:
+        accuracy_topk = accuracy_topk.mean()
+    return accuracy_topk
+
+
+class Metrics(dict):
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            item = {key: values[key] for metric, values in self.items()}
+        else:
+            item = super().__getitem__(key)
+        return item
+
+    def append(self, metric_tuple):
+        for metric, value in metric_tuple:
+            self[metric].append(value)
+
+
 class TargetPropOptimizer:
     
-    def __init__(self, modules, sizes, loss_functions, 
-                 batch_size, state=[], use_gpu=True):
+    def __init__(self, modules, sizes, activations, loss_functions, 
+                 batch_size, state=[], criterion="loss", use_gpu=True):
         self.modules = modules
         self.sizes = [[batch_size] + shape for shape in sizes]
+        self.activations = activations
         self.loss_functions = loss_functions
         self.state = {}
+        self.criterion = criterion
         self.use_gpu = use_gpu
 
     def generate_targets(self, train_step, module_index, input, 
@@ -317,7 +357,17 @@ class TargetPropOptimizer:
         output = module(candidate_var)
         if module_index > 0:
             output = output.view_as(target_batch)
-        losses = loss_function(output, target_batch)
+            if self.criterion != "loss":
+                output = self.activations[module_index](output)
+            if self.criterion == "accuracy_top5":
+                raise RuntimeError("Can only use top 5 accuracy as "
+                                   "optimization criteria at output layer.")
+        if self.criterion == "loss":
+            losses = loss_function(output, target_batch)
+        elif self.criterion == "accuracy":
+            losses = accuracy(output, target_batch, average=False)
+        elif self.criterion == "accuracy_top5":
+            losses = accuracy_topk(output, target_batch, average=False)
         losses = losses.view(len(candidates), int(np.prod(target.shape)))
         return losses.mean(dim=1)  # mean everything but candidate batch dim
 
@@ -366,9 +416,9 @@ def get_random_tensor(shape, make01=False, use_gpu=True):
 
 class LocalSearchOptimizer(TargetPropOptimizer):
 
-    def __init__(self, modules, sizes, loss_functions, batch_size, perturb_size=50, 
-                 candidates=50, iterations=10, searches=1, state=[], use_gpu=True):
-        super().__init__(modules, sizes, loss_functions, batch_size, state, use_gpu)
+    def __init__(self, *args, perturb_size=50, candidates=50, 
+                 iterations=10, searches=1, **kwargs):
+        super().__init__(*args, **kwargs)
         self.perturb_size = perturb_size
         self.candidates = candidates
         self.iterations = iterations
@@ -402,9 +452,10 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                 if nbhd_size == 0:
                     raise RuntimeError("Neighborhood size should be nonzero!")
                 else:
+                    neighbors.append(candidate.unsqueeze(0))
                     neighbors.append(generate_neighborhood(
                         candidate, masking_weights, nbhd_size, perturb_size))
-            nbhd_sizes = [size for _, size, _ in candidates]
+            nbhd_sizes = [size+1 for _, size, _ in candidates]
             candidate_batch = torch.cat(neighbors)
             candidate_losses = self.evaluate_targets(
                 module, module_index, loss_function, target, candidate_batch)
@@ -609,35 +660,12 @@ class GeneticOptimizer(TargetPropOptimizer):
         return candidate_index, loss
 
 
-def accuracy(prediction, target):
-    return 100 * prediction.max(dim=1)[1].eq(target).float().mean().cpu()
-
-
-def accuracy_topk(prediction, target, k=5):
-    _, predictions_top5 = torch.topk(prediction, k, dim=1, largest=True)
-    return 100 * (predictions_top5 == target.unsqueeze(1)).max(
-        dim=1)[0].float().mean().cpu()
-
-
-class Metrics(dict):
-
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            item = {key: values[key] for metric, values in self.items()}
-        else:
-            item = super().__getitem__(key)
-        return item
-
-    def append(self, metric_tuple):
-        for metric, value in metric_tuple:
-            self[metric].append(value)
-
-
 def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
-          optimizer, epochs, num_classes, target_optimizer=None, 
+          optimizer, epochs, num_classes, target_optimizer=None, logger=None,
           use_gpu=True, args=None, print_param_info=False):
     model.train()
     batch_size = train_dataset_loader.batch_size
+    batches = len(train_dataset_loader)
     train_per_layer = target_optimizer is not None
     if train_per_layer:
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
@@ -648,6 +676,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
         target_optimizer = target_optimizer(
             modules=list(model.all_modules)[::-1],
             sizes=model.input_sizes[::-1],
+            activations=list(model.all_activations[::-1]),
             loss_functions=[loss_function]*len(model.all_modules),
             use_gpu=use_gpu)
     else:
@@ -662,7 +691,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             for i, activation in enumerate(activations):
                 activation.initialize_momentum_state(
                     [batch_size] + model.input_sizes[i+1], num_classes)
-    training_metrics = Metrics({'dataset_batches': len(train_dataset_loader),
+    training_metrics = Metrics({'dataset_batches': batches,
                                 'loss': [], 'accuracy': [], 
                                 'accuracy_top5': [], 'steps/sec': []})
     eval_metrics = Metrics({'dataset_batches': len(eval_dataset_loader), 
@@ -672,7 +701,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             scheduler.step()
         if epoch == 0:
             evaluate(model, eval_dataset_loader, loss_function, 
-                     eval_metrics, log=True, use_gpu=use_gpu)
+                     eval_metrics, logger, 0, log=True, use_gpu=use_gpu)
         last_time = time()
         model.train()
         for i, batch in enumerate(train_dataset_loader):
@@ -690,10 +719,11 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     inputs = inputs.view(batch_size, 784)
                 except RuntimeError:
                     inputs = inputs.view(batch_size, 15)
+            train_step = epoch*batches + i
             if i % 10 == 1:
                 last_time = eval_step(model, inputs, labels, loss_function, 
-                                      training_metrics, epoch, i, last_time)
-            train_step = epoch*len(train_dataset_loader) + i
+                                      training_metrics, logger, epoch, 
+                                      i, train_step, last_time)
             targets = labels
             if train_per_layer:
                 # Obtain activations / hidden states
@@ -711,16 +741,23 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     outputs = activations[j]
                     if j == 0:
                         loss = loss_function(outputs, targets).mean()
+                        output_loss = loss
                     else:
                         loss = soft_hinge_loss(outputs, targets.float()).mean()
                     loss.backward()
                     optimizer.step()
+                    if j == 1 and i % 5 == 1:
+                        # Check loss change after SGD update step
+                        updated_loss = loss_function(model(inputs), labels).mean()
+                        loss_delta = updated_loss - output_loss
+                        logger.scalar_summary(
+                            "train/loss_delta", loss_delta.item(), train_step)
                     if j != len(modules)-1:
                         activation = model.all_activations[len(modules)-1-j-1](
                             activations[j+1].detach())
-                        targets, _ = target_optimizer.step(
+                        targets, target_loss = target_optimizer.step(
                             train_step, j, targets, label=labels, 
-                            base_targets=[[None, 0.5, 500], [activation, 0.5, 2000]])
+                            base_targets=[[None, 1, 350]])
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
@@ -746,45 +783,48 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     loss.backward()
                 optimizer.step()
         evaluate(model, eval_dataset_loader, loss_function, 
-                 eval_metrics, log=True, use_gpu=use_gpu)
+                 eval_metrics, logger, train_step, log=True, use_gpu=use_gpu)
         store_checkpoint(model, optimizer, args, training_metrics, 
                          eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
         if target_optimizer is not None:
-            print(sum(target_optimizer.state["chosen_groups"][
-                      -len(train_dataset_loader):])/len(train_dataset_loader), "\n")
+            print(Counter(target_optimizer.state["chosen_groups"][-batches:]), "\n")
 
 
-def eval_step(model, inputs, labels, loss_function, 
-              training_metrics, epoch, batch, last_step_time):
+def eval_step(model, inputs, labels, loss_function, training_metrics, 
+              logger, epoch, batch, step, last_step_time):
     model.eval()
     outputs = model(inputs)
-    loss = loss_function(outputs, labels)
-    batch_accuracy = accuracy(outputs, labels)
+    loss = loss_function(outputs, labels).mean().item()
+    batch_accuracy = accuracy(outputs, labels).item()
     if isinstance(model, ToyNet):
         batch_accuracy_top5 = 0
     else:
-        batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5)
+        batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5).item()
     if batch == 1:
         steps = 1
     else:
         steps = 10
     current_time = time()
     steps_per_sec = steps/(current_time-last_step_time)
-    metric_tuple = (('loss', loss.data[0]), ('accuracy', batch_accuracy), 
+    metric_tuple = (('loss', loss), ('accuracy', batch_accuracy), 
                     ('accuracy_top5', batch_accuracy_top5), 
                     ('steps/sec', steps_per_sec))
     training_metrics.append(metric_tuple)
     print('training --- epoch: %d, batch: %d, loss: %.3f, acc: %.3f, '
           'acc_top5: %.3f, steps/sec: %.2f' 
-          % (epoch+1, batch+1, loss.data[0], batch_accuracy, 
+          % (epoch+1, batch+1, loss, batch_accuracy, 
              batch_accuracy_top5, steps_per_sec))
+    if logger is not None:
+        logger.scalar_summary('train/loss', loss, step)
+        logger.scalar_summary('train/accuracy', batch_accuracy, step)
+        logger.scalar_summary('train/top5_accuracy', batch_accuracy_top5, step)
     last_step_time = current_time
     model.train()
     return last_step_time
 
 
 def evaluate(model, dataset_loader, loss_function, 
-             eval_metrics, log=True, use_gpu=True):
+             eval_metrics, logger, step, log=True, use_gpu=True):
     model.eval()
     batch_size = dataset_loader.batch_size
     total_loss, total_accuracy, total_accuracy_top5 = 0, 0, 0
@@ -801,11 +841,11 @@ def evaluate(model, dataset_loader, loss_function,
             except RuntimeError:
                 inputs = inputs.view(batch_size, 15)
         outputs = model(inputs)
-        loss = loss_function(outputs, labels).data[0]
+        loss = loss_function(outputs, labels).mean().item()
         total_loss += loss
-        total_accuracy += accuracy(outputs, labels)
+        total_accuracy += accuracy(outputs, labels).item()
         if not isinstance(model, ToyNet):
-            total_accuracy_top5 += accuracy_topk(outputs, labels, k=5)
+            total_accuracy_top5 += accuracy_topk(outputs, labels, k=5).item()
 
     loss = total_loss / len(dataset_loader)
     total_accuracy = total_accuracy / len(dataset_loader)
@@ -816,6 +856,10 @@ def evaluate(model, dataset_loader, loss_function,
     if log:
         print('\nevaluation --- loss: %.3f, acc: %.3f, acc_top5: %.3f \n' 
               % (loss, total_accuracy, total_accuracy_top5))
+        if logger is not None:
+            logger.scalar_summary('eval/loss', loss, step)
+            logger.scalar_summary('eval/accuracy', total_accuracy, step)
+            logger.scalar_summary('eval/top5_accuracy', total_accuracy_top5, step)
     eval_metrics.append((('loss', loss), ('accuracy', total_accuracy), 
                          ('accuracy_top5', total_accuracy_top5)))
 
