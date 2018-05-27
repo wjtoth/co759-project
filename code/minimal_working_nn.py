@@ -1,5 +1,6 @@
 # python
 import os
+import re
 import sys
 import argparse
 import random
@@ -751,6 +752,11 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 last_time = eval_step(model, inputs, labels, loss_function, 
                                       training_metrics, logger, epoch, 
                                       i, train_step, last_time)
+            if train_step in [0, 10, 100, 1000, 10000, 50000] and args.model == "toynet":
+                store_parameters(model, labels[10], train_step, 
+                                 "model_data\\" + args.model + "_" + args.dataset
+                                 + "bs" + str(args.batch) + "_" + args.nonlin 
+                                 + "_" + ("comb" if args.comb_opt else "grad"))
             targets = labels
             if train_per_layer:
                 # Obtain activations / hidden states
@@ -784,7 +790,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         #     activations[j+1].detach())
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, label=labels, 
-                            base_targets=[[None, 1/1, 3000] for i in range(1)])
+                            base_targets=[[None, 1/1, 500] for i in range(1)])
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
@@ -962,6 +968,33 @@ def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
 
     checkpoint_state = torch.load(os.path.join(log_dir, checkpoint_files[-1]))
     return checkpoint_state
+
+
+def store_parameters(model, label, train_step, file_prefix, layer=2):
+    torch.set_printoptions(threshold=1000000, linewidth=1000000)
+    parameters = list(model.parameters())
+    weight_matrix = parameters[2*(layer-1)]
+    bias_vector = parameters[2*(layer-1)+1]
+    weight_rows = re.findall(r"\[.*?\]", str(weight_matrix))
+    bias_rows = re.findall(r"\[.*?\]", str(bias_vector))
+    weight_file_name = file_prefix + "_weight_step" + str(train_step) + ".txt"
+    with open(weight_file_name, "w+") as weight_file:
+        for row in weight_rows:
+            print(row, file=weight_file)
+    bias_file_name = file_prefix + "_bias_step" + str(train_step) + ".txt"
+    with open(bias_file_name, "w+") as bias_file:
+        for row in bias_rows:
+            print(row, file=bias_file)
+    if label.numel() == 1:
+        label_vector = torch.zeros(10)
+        label_vector[label] = 1
+        label = label_vector
+    label_rows = re.findall(r"\[.*?\]", str(label))
+    label_file_name = file_prefix + "_target_step" + str(train_step) + ".txt"
+    with open(label_file_name, "w+") as label_file:
+        for row in label_rows:
+            print(row, file=label_file)
+    torch.set_printoptions(profile="default")
 
 
 class ToyNet(nn.Module):
