@@ -339,23 +339,22 @@ class TargetPropOptimizer:
         """
         raise NotImplementedError
 
-    def evaluate_targets(self, module, module_index, loss_function, target, candidates):
+    def evaluate_targets(self, module, module_index, loss_function, targets, candidates):
         if torch.is_tensor(candidates):
             candidate_batch = candidates
         else:
             candidate_batch = torch.stack(candidates)
-        target_batch = torch.stack([target]*len(candidates))
+        if torch.is_tensor(targets):
+            target_batch = targets
+        else:
+            target_batch = torch.stack(targets)
         candidate_batch = candidate_batch.view(
             candidate_batch.shape[0]*candidate_batch.shape[1], 
             *candidate_batch.shape[2:])
         target_batch = target_batch.view(
             target_batch.shape[0]*target_batch.shape[1], 
             *target_batch.shape[2:])
-        if self.use_gpu:
-            candidate_var = Variable(candidate_batch).cuda()
-        else:
-            candidate_var = Variable(candidate_batch)
-        output = module(candidate_var)
+        output = module(candidate_batch)
         if module_index > 0:
             output = output.view_as(target_batch)
             if self.criterion != "loss":
@@ -369,7 +368,7 @@ class TargetPropOptimizer:
             losses = accuracy(output, target_batch, average=False)
         elif self.criterion == "accuracy_top5":
             losses = accuracy_topk(output, target_batch, average=False)
-        losses = losses.view(len(candidates), int(np.prod(target.shape)))
+        losses = losses.view(len(candidates), int(np.prod(targets.shape[1:])))
         return losses.mean(dim=1)  # mean everything but candidate batch dim
 
     def step(self, train_step, module_index, target, input=None, 
@@ -378,27 +377,32 @@ class TargetPropOptimizer:
                                      label, target, base_targets)
 
 
-def generate_neighborhood(base_tensor, masking_weights, size, radius):
+def generate_neighborhood(base_tensor, size, radius, 
+                          masking_weights=None, perturb_base_tensor=None):
     """
     Args:
         base_tensor: torch.LongTensor; base tensor whose 
             neighborhood is generated.
-        masking_weights: torch.FloatTensor; weights for randomly sampling 
-            indices to perturb. 
         size: Int; size of the neighborhood, that is, the number of 
             tensors to generate. 
         radius: Int; (expected) number of values to perturb in 
             generating each neighbor. 
+        masking_weights: torch.FloatTensor; weights for randomly sampling 
+            indices to perturb (optional, default: None). 
     Returns:
         A total of 'size' randomly-generated neighbors of base_tensor. 
     """
-    batch_mask = torch.stack([masking_weights]*size)
     batch_base = torch.stack([base_tensor]*size)
     sampling_prob = radius / base_tensor.numel()
-    one_tensor = torch.ones(batch_base.shape, device=torch.device("cuda:0"))
+    if perturb_base_tensor is None:
+        one_tensor = torch.ones(batch_base.shape, device=torch.device("cuda:0"))
+    else:
+        one_tensor = perturb_base_tensor
     indices = torch.bernoulli(one_tensor*sampling_prob)
-    sampling_mask = indices.float() * batch_mask
-    indices = torch.bernoulli(sampling_mask)
+    if masking_weights:
+        batch_mask = torch.stack([masking_weights]*size)
+        sampling_mask = indices.float() * batch_mask
+        indices = torch.bernoulli(sampling_mask)  
     neighbourhood = batch_base * (indices*-2 + 1)
     return neighbourhood
 
@@ -426,6 +430,10 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         self.searches = searches
         self.search_type = search_type
         self.state = {"chosen_groups": []}
+        # To save a little time, create perturbation tensors beforehand:
+        self.perturb_base_tensors = [
+            torch.ones([self.candidates] + shape, device=torch.device("cuda:0"))
+            for shape in self.sizes]
 
     def find_candidates(self, module_index, target, train_step, base_candidates=None):
         loss_function = self.loss_functions[module_index]
@@ -433,8 +441,11 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         if module_index > 0:
             target = target.float()
             loss_function = partial(soft_hinge_loss, reduce_=False)
+        targets = torch.stack([target]*(self.candidates 
+            + (len(base_candidates) if base_candidates is not None else 1)))
 
         candidates = base_candidates
+        perturb_base_tensors = [None]*len(candidates)
         for i, [candidate, weight, perturb_size] in enumerate(candidates.copy()):
             candidates[i][1] = round(self.candidates*weight)
             if candidate is None:
@@ -442,25 +453,25 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                     self.sizes[module_index], use_gpu=self.use_gpu)
             if perturb_size is None:
                 candidates[i][2] = self.perturb_size
+            perturb_base_tensors[i] = self.perturb_base_tensors[module_index].clone()
         candidates = [candidate_tuple for candidate_tuple in candidates 
                       if round(self.candidates*candidate_tuple[1])]
 
         # Local search to find better candidate
-        masking_weights = torch.ones(
-            candidates[0][0].shape, device=torch.device("cuda:0"))
         for i in range(self.iterations):
             neighbors = []
-            for [candidate, nbhd_size, perturb_size] in candidates:
+            for j, [candidate, nbhd_size, perturb_size] in enumerate(candidates):
                 if nbhd_size == 0:
                     raise RuntimeError("Neighborhood size should be nonzero!")
                 else:
                     neighbors.append(candidate.unsqueeze(0))
                     neighbors.append(generate_neighborhood(
-                        candidate, masking_weights, nbhd_size, perturb_size))
+                        candidate, nbhd_size, perturb_size, 
+                        perturb_base_tensor=perturb_base_tensors[j]))
             nbhd_sizes = [size+1 for _, size, _ in candidates]
             candidate_batch = torch.cat(neighbors)
             candidate_losses = self.evaluate_targets(
-                module, module_index, loss_function, target, candidate_batch)
+                module, module_index, loss_function, targets, candidate_batch)
             if self.search_type == "beam":
                 candidate_losses = [candidate_losses]
                 candidate_groups = [candidate_batch]
@@ -487,11 +498,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
             candidates = chosen_candidates
 
         for [candidate, _, _], loss in zip(candidates, chosen_losses):
-            if self.use_gpu:
-                candidate_var = Variable(candidate).cuda()
-            else:
-                candidate_var = Variable(candidate)
-            self.state["candidates"].append((candidate_var.long(), loss))
+            self.state["candidates"].append((candidate.long(), loss))
 
     def generate_targets(self, train_step, module_index, 
                          input, label, target, base_targets=None):
@@ -510,7 +517,7 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                 raise NotImplementedError("Top-k element retrieval with k > 1 "
                                           "not implemented for lists.")
             candidate_indices, losses = min(
-                enumerate(losses), key=lambda element: element[1].data[0])
+                enumerate(losses), key=lambda element: element[1].item())
         else:
             losses, candidate_indices = torch.topk(
                 losses, k, dim=0, largest=False, sorted=False)
@@ -720,8 +727,9 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
         for scheduler in lr_schedulers:
             scheduler.step()
         if epoch == 0:
-            evaluate(model, eval_dataset_loader, loss_function, 
-                     eval_metrics, logger, 0, log=True, use_gpu=use_gpu)
+            with torch.no_grad():
+                evaluate(model, eval_dataset_loader, loss_function, 
+                         eval_metrics, logger, 0, log=True, use_gpu=use_gpu)
         last_time = time()
         model.train()
         for i, batch in enumerate(train_dataset_loader):
@@ -731,7 +739,6 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 inputs, labels, _ = batch
             if inputs.shape[0] != batch_size:
                 continue
-            inputs, labels = Variable(inputs), Variable(labels)
             if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
             if isinstance(model, ToyNet):
@@ -760,24 +767,24 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     optimizer.zero_grad()
                     outputs = activations[j]
                     if j == 0:
-                        loss = loss_function(outputs, targets).mean()
+                        loss = loss_function(outputs, targets.detach()).mean()
                         output_loss = loss
                     else:
-                        loss = soft_hinge_loss(outputs, targets.float()).mean()
+                        loss = soft_hinge_loss(outputs, targets.detach().float()).mean()
                     loss.backward()
                     optimizer.step()
-                    if j == 1 and i % 5 == 1:
+                    if j == 1 and i % 5 == 1 and False:
                         # Check loss change after SGD update step
                         updated_loss = loss_function(model(inputs), labels).mean()
                         loss_delta = updated_loss - output_loss
                         logger.scalar_summary(
                             "train/loss_delta", loss_delta.item(), train_step)
                     if j != len(modules)-1:
-                        activation = model.all_activations[len(modules)-1-j-1](
-                            activations[j+1].detach())
+                        # activation = model.all_activations[len(modules)-1-j-1](
+                        #     activations[j+1].detach())
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, label=labels, 
-                            base_targets=[[None, 1/4, 500] for i in range(4)])
+                            base_targets=[[None, 1/1, 3000] for i in range(1)])
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
@@ -802,10 +809,11 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     optimizer.zero_grad()
                     loss.backward()
                 optimizer.step()
-        evaluate(model, eval_dataset_loader, loss_function, 
-                 eval_metrics, logger, train_step, log=True, use_gpu=use_gpu)
-        store_checkpoint(model, optimizer, args, training_metrics, 
-                         eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
+        with torch.no_grad():
+            evaluate(model, eval_dataset_loader, loss_function, 
+                     eval_metrics, logger, train_step, log=True, use_gpu=use_gpu)
+        # store_checkpoint(model, optimizer, args, training_metrics, 
+        #                  eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
         if target_optimizer is not None:
             print(Counter(target_optimizer.state["chosen_groups"][-batches:]), "\n")
 
@@ -851,8 +859,6 @@ def evaluate(model, dataset_loader, loss_function,
     for inputs, labels in dataset_loader:
         if inputs.shape[0] != batch_size:
             continue
-        inputs = Variable(inputs, volatile=True)
-        labels = Variable(labels, volatile=True)
         if use_gpu:
             inputs, labels = inputs.cuda(), labels.cuda()
         if isinstance(model, ToyNet):
@@ -1014,13 +1020,22 @@ class ConvNet4(nn.Module):
         self.fc2_size = 10
         self.separate_activations = separate_activations
 
-        self.input_sizes = [
-            list(input_shape), 
-            [self.conv1_size, (input_shape[1]//4)*(input_shape[2]//4)//4 + 1, 
-             self.conv2_size//4 + 1], 
-            [self.conv2_size, input_shape[1] // 4, input_shape[2] // 4], 
-            [self.fc1_size],
-        ]
+        if input_shape == (1, 28, 28):
+            self.input_sizes = [
+                list(input_shape), 
+                [self.conv1_size, (input_shape[1]//4 + 1)*(input_shape[2]//4 + 1)//4 - 1, 
+                 self.conv2_size//4 - 1], 
+                [self.conv2_size, input_shape[1]//4, input_shape[2]//4], 
+                [self.fc1_size],
+            ]
+        else:
+            self.input_sizes = [
+                list(input_shape), 
+                [self.conv1_size, (input_shape[1]//4)*(input_shape[2]//4)//4 + 1, 
+                 self.conv2_size//4 + 1], 
+                [self.conv2_size, input_shape[1] // 4, input_shape[2] // 4], 
+                [self.fc1_size],
+            ]
 
         block1 = OrderedDict([
             ('conv1', nn.Conv2d(input_shape[0], self.conv1_size, 
