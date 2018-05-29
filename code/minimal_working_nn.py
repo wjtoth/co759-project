@@ -202,7 +202,7 @@ def main():
                 raise NotImplementedError(
                     "Discrete opt methods currently only support nonlin = step11.")
             if args.comb_opt_method == 'local_search':
-                target_optimizer = partial(
+                target_optimizer = partial( 
                     LocalSearchOptimizer, batch_size=args.batch, 
                     criterion="loss", perturb_size=1000, candidates=64, 
                     iterations=10, searches=1, search_type="beam")
@@ -363,14 +363,27 @@ class TargetPropOptimizer:
             if self.criterion == "accuracy_top5":
                 raise RuntimeError("Can only use top 5 accuracy as "
                                    "optimization criteria at output layer.")
-        if self.criterion == "loss":
+        if self.criterion in ["loss", "loss_grad"]:
             losses = loss_function(output, target_batch)
         elif self.criterion == "accuracy":
             losses = accuracy(output, target_batch, average=False)
         elif self.criterion == "accuracy_top5":
             losses = accuracy_topk(output, target_batch, average=False)
         losses = losses.view(len(candidates), int(np.prod(targets.shape[1:])))
-        return losses.mean(dim=1)  # mean everything but candidate batch dim
+        losses = losses.mean(dim=1)  # mean everything but candidate batch dim
+        if self.criterion == "loss_grad":
+            losses.sum(dim=0).backward()
+            loss_grad = candidate_batch.grad.view_as(candidates)
+            truncated_length = self.regions*(loss_grad.shape[1]//self.regions)
+            loss_grad = loss_grad.resize_(
+                loss_grad.shape[0], truncated_length, *loss_grad.shape[2:])
+            loss_grad = loss_grad.view(
+                loss_grad.shape[0], self.regions, 
+                loss_grad.shape[1]//self.regions, *loss_grad.shape[2:])
+            loss_grad = loss_grad.mean(dim=2)
+            return losses, loss_grad
+        else:
+            return losses
 
     def step(self, train_step, module_index, target, input=None, 
              label=None, base_targets=None):
@@ -790,7 +803,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         #     activations[j+1].detach())
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, label=labels, 
-                            base_targets=[[None, 1/1, 500] for i in range(1)])
+                            base_targets=[[None, 1/1, 3000] for i in range(1)])
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
