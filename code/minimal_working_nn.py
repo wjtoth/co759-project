@@ -204,7 +204,7 @@ def main():
             if args.comb_opt_method == 'local_search':
                 target_optimizer = partial( 
                     LocalSearchOptimizer, batch_size=args.batch, 
-                    criterion="loss", perturb_size=1000, candidates=64, 
+                    criterion="loss", regions=10, perturb_size=1000, candidates=64, 
                     iterations=10, searches=1, search_type="beam")
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
@@ -310,13 +310,14 @@ class Metrics(dict):
 class TargetPropOptimizer:
     
     def __init__(self, modules, sizes, activations, loss_functions, 
-                 batch_size, state=[], criterion="loss", use_gpu=True):
+                 batch_size, state=[], criterion="loss", regions=10, use_gpu=True):
         self.modules = modules
         self.sizes = [[batch_size] + shape for shape in sizes]
         self.activations = activations
         self.loss_functions = loss_functions
         self.state = {}
         self.criterion = criterion
+        self.regions = regions
         self.use_gpu = use_gpu
 
     def generate_targets(self, train_step, module_index, input, 
@@ -355,6 +356,8 @@ class TargetPropOptimizer:
         target_batch = target_batch.view(
             target_batch.shape[0]*target_batch.shape[1], 
             *target_batch.shape[2:])
+        candidate_batch = candidate_batch.detach()
+        candidate_batch.requires_grad_()
         output = module(candidate_batch)
         if module_index > 0:
             output = output.view_as(target_batch)
@@ -374,12 +377,12 @@ class TargetPropOptimizer:
         if self.criterion == "loss_grad":
             losses.sum(dim=0).backward()
             loss_grad = candidate_batch.grad.view_as(candidates)
+            loss_grad = loss_grad.view(loss_grad.shape[0], 
+                                       int(np.prod(loss_grad.shape[1:])))
             truncated_length = self.regions*(loss_grad.shape[1]//self.regions)
-            loss_grad = loss_grad.resize_(
-                loss_grad.shape[0], truncated_length, *loss_grad.shape[2:])
-            loss_grad = loss_grad.view(
-                loss_grad.shape[0], self.regions, 
-                loss_grad.shape[1]//self.regions, *loss_grad.shape[2:])
+            loss_grad = loss_grad.resize_(loss_grad.shape[0], truncated_length) 
+            loss_grad = loss_grad.view(loss_grad.shape[0], self.regions, 
+                                       loss_grad.shape[1]//self.regions)
             loss_grad = loss_grad.mean(dim=2)
             return losses, loss_grad
         else:
@@ -433,6 +436,22 @@ def get_random_tensor(shape, make01=False, use_gpu=True):
     return candidate
 
 
+def add_dimensions(tensor, k):
+    if tensor.dim() != 2:
+        raise NotImplementedError("Not implemented for tensors of dimension != 2!")
+    if k == 1:
+        expanded_tensor = tensor[:, :, None]
+    elif k == 2:
+        expanded_tensor = tensor[:, :, None, None]
+    elif k == 3:
+        expanded_tensor = tensor[:, :, None, None, None]
+    elif k == 4:
+        expanded_tensor = tensor[:, :, None, None, None, None]
+    else:
+        raise NotImplementedError("Can't add more than 4 additional dimensions!")
+    return expanded_tensor
+
+
 class LocalSearchOptimizer(TargetPropOptimizer):
 
     def __init__(self, *args, perturb_size=50, candidates=50, 
@@ -484,20 +503,60 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                         perturb_base_tensor=perturb_base_tensors[j]))
             nbhd_sizes = [size+1 for _, size, _ in candidates]
             candidate_batch = torch.cat(neighbors)
-            candidate_losses = self.evaluate_targets(
-                module, module_index, loss_function, targets, candidate_batch)
+            if self.criterion == "loss_grad":
+                candidate_losses, candidate_loss_grad = self.evaluate_targets(
+                    module, module_index, loss_function, targets, candidate_batch)
+            else:
+                candidate_losses = self.evaluate_targets(
+                    module, module_index, loss_function, targets, candidate_batch)
             if self.search_type == "beam":
                 candidate_losses = [candidate_losses]
                 candidate_groups = [candidate_batch]
+                if self.criterion == "loss_grad":
+                    candidate_loss_grad = [candidate_loss_grad]
+                else:
+                    candidate_loss_grad = [None]
             else:
                 candidate_losses = torch.split(candidate_losses, nbhd_sizes)
                 candidate_groups = torch.split(candidate_batch, nbhd_sizes)
+                if self.criterion == "loss_grad":
+                    candidate_loss_grad = torch.split(candidate_loss_grad, nbhd_sizes)
+                else:
+                    candidate_loss_grad = [None for i in range(len(candidates))]
             chosen_candidates, chosen_losses = [], []
-            for j, (losses, candidate_group) in enumerate(
-                    zip(candidate_losses, candidate_groups)):
+            for j, (losses, loss_grad, candidate_group) in enumerate(
+                    zip(candidate_losses, candidate_loss_grad, candidate_groups)):
                 k = len(candidates) if self.search_type == "beam" else 1
-                candidate_indices, losses = self.choose_target(losses, k)
-                best_candidates = candidate_group[candidate_indices]
+                if self.criterion == "loss_grad":
+                    region_indices, grad_norms = self.choose_targets(
+                        losses, k, loss_grad)
+                    candidate_group_trunc = candidate_group.clone().resize_(
+                        candidate_group.shape[0], 
+                        self.regions*(candidate_group.shape[1]//self.regions), 
+                        *candidate_group.shape[2:])
+                    missing_indices = candidate_group.shape[1] % self.regions
+                    candidate_group_trunc = candidate_group_trunc.view(
+                        candidate_group_trunc.shape[0], self.regions, 
+                        candidate_group_trunc.shape[1]//self.regions,
+                        *candidate_group_trunc.shape[2:])
+                    region_indices_expand = add_dimensions(
+                        region_indices, candidate_group_trunc.dim()-2)
+                    region_indices_expand = region_indices_expand.expand(
+                        *region_indices.shape[:2], *candidate_group_trunc.shape[2:])
+                    candidate_regions = torch.gather(
+                        candidate_group_trunc, 0, region_indices_expand)
+                    best_candidates_trunc = candidate_regions.view(
+                        candidate_regions.shape[0], 
+                        candidate_regions.shape[1]*candidate_regions.shape[2], 
+                        *candidate_regions.shape[3:])
+                    best_candidates = torch.cat(
+                        [best_candidates_trunc, 
+                         candidate_group[region_indices[:,-1], -missing_indices:]], 
+                         dim=1)
+                else:
+                    candidate_indices, losses = self.choose_targets(
+                        losses, k, loss_grad)
+                    best_candidates = candidate_group[candidate_indices]
                 if self.search_type == "beam":
                     best_candidates = [
                         [candidate.squeeze(0), candidates[j][1], candidates[j][2]] 
@@ -506,36 +565,67 @@ class LocalSearchOptimizer(TargetPropOptimizer):
                     best_candidates = [[best_candidates.squeeze(0), 
                                         candidates[j][1], candidates[j][2]]]
                 chosen_candidates.extend(best_candidates)
-                chosen_losses.extend(
-                    [loss.squeeze(0) for loss in losses.chunk(k)] 
-                    if self.search_type == "beam" else [losses.squeeze(0)])
+                if self.criterion == "loss_grad":
+                    chosen_losses.extend([None for i in range(k)])
+                else:
+                    chosen_losses.extend(
+                        [loss.squeeze(0) for loss in losses.chunk(k)] 
+                        if self.search_type == "beam" else [losses.squeeze(0)])
             candidates = chosen_candidates
 
         for [candidate, _, _], loss in zip(candidates, chosen_losses):
-            self.state["candidates"].append((candidate.long(), loss))
+            candidate_tuple = ()
+            if loss is None:
+                candidate_tuple = (candidate.long(), None)
+            else:
+                candidate_tuple = (candidate.long(), loss)
+            self.state["candidates"].append(candidate_tuple)
 
     def generate_targets(self, train_step, module_index, 
                          input, label, target, base_targets=None):
         self.state["candidates"] = []
         for i in range(self.searches):
             self.find_candidates(module_index, target, train_step, base_targets)
-        index, loss = self.choose_target(
+        index, loss = self.choose_targets(
             [loss for candidate, loss in self.state["candidates"]])
         if self.search_type == "parallel":
             self.state["chosen_groups"].append(index)
         return self.state["candidates"][index][0], loss
     
-    def choose_target(self, losses, k=1):
+    def choose_targets(self, losses, k=1, loss_grad=None):
         if isinstance(losses, list):
             if k != 1:
                 raise NotImplementedError("Top-k element retrieval with k > 1 "
                                           "not implemented for lists.")
-            candidate_indices, losses = min(
-                enumerate(losses), key=lambda element: element[1].item())
+            if any(element is None for element in losses):
+                candidate_indices, top_losses = 0, None
+            else:
+                candidate_indices, top_losses = min(
+                    enumerate(losses), key=lambda element: element[1].item())
         else:
-            losses, candidate_indices = torch.topk(
-                losses, k, dim=0, largest=False, sorted=False)
-        return candidate_indices, losses
+            if loss_grad is None:
+                top_losses, candidate_indices = torch.topk(
+                    losses, k, dim=0, largest=False, sorted=False)
+            else:
+                grad_norm = torch.abs(loss_grad)
+                loss_factors = torch.stack([losses]*self.regions, dim=1) 
+                loss_factors = loss_factors / torch.min(loss_factors)
+                grad_norm = grad_norm * loss_factors  # accounts for loss differences
+                top_grad_norm, top_region_indices = torch.min(
+                    grad_norm, dim=0, keepdim=True)
+                if k > 1:
+                    if k > self.regions:
+                        raise NotImplementedError(
+                            "Currently require that the beam size is larger " 
+                            "than the number of sampled candidate regions.")
+                    grad_norm, region_indices = torch.topk(
+                        grad_norm, 2, dim=0, largest=False, sorted=True)
+                    off_best_indices = torch.randperm(self.regions)[:k-1]
+                    raise NotImplementedError
+        if loss_grad is None:
+            return candidate_indices, top_losses
+        else:
+            return top_region_indices, top_grad_norm
 
 
 class NeighbourhoodIterator:
@@ -803,7 +893,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         #     activations[j+1].detach())
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, label=labels, 
-                            base_targets=[[None, 1/1, 3000] for i in range(1)])
+                            base_targets=[[None, 1/1, 50000] for i in range(1)])
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
