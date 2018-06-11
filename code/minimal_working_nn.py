@@ -182,7 +182,8 @@ def main():
     if args.cuda:
         network = network.cuda()
 
-    tb_logger = TensorBoardLogger('new_logs')
+    #tb_logger = TensorBoardLogger('new_logs')
+    tb_logger = None
 
     if args.no_train:
         print('Loading from last checkpoint...')
@@ -203,9 +204,10 @@ def main():
                     "Discrete opt methods currently only support nonlin = step11.")
             if args.comb_opt_method == 'local_search':
                 target_optimizer = partial( 
-                    LocalSearchOptimizer, batch_size=args.batch, 
-                    criterion="loss", regions=10, perturb_size=1000, candidates=64, 
-                    iterations=10, searches=1, search_type="beam")
+                    SearchOptimizer, batch_size=args.batch, 
+                    criterion="loss", regions=10, 
+                    perturb_scheduler=lambda x, y, z: 1000, 
+                    candidates=64, iterations=10, searches=1, search_type="beam")
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -309,10 +311,10 @@ class Metrics(dict):
 
 class TargetPropOptimizer:
     
-    def __init__(self, modules, sizes, activations, loss_functions, 
+    def __init__(self, modules, shapes, activations, loss_functions, 
                  batch_size, state=[], criterion="loss", regions=10, use_gpu=True):
         self.modules = modules
-        self.sizes = [[batch_size] + shape for shape in sizes]
+        self.shapes = [[batch_size] + shape for shape in shapes]
         self.activations = activations
         self.loss_functions = loss_functions
         self.state = {}
@@ -320,28 +322,24 @@ class TargetPropOptimizer:
         self.regions = regions
         self.use_gpu = use_gpu
 
-    def generate_targets(self, train_step, module_index, input, 
-                         label, target, base_targets=None):
+    def generate_target(self, train_step, module_index, 
+                        module_target, base_targets=None):
         """
         Subclasses should override this method.
         Args:
             train_step: Int.
             module_index: Int.
-            input: torch.Tensor; input to the model corresponding 
-                to self.modules at this training step.
-            label: torch.Tensor; label corresponding to input 
-                at this training step.
-            target: torch.Tensor; target tensor for module module_index 
+            module_target: torch.Tensor; target tensor for module module_index 
                 to be used for generating, evaluating, and choosing 
                 the targets of module module_index-1.
             base_targets: List; set of target tensors to use for generating 
                 new targets (optional, default: None).
-        Should generate a target torch.Tensor, list of target torch.Tensors, 
-        or dictionary of target torch.Tensors and store it in the optimizer state.
+        Should return a target torch.Tensor and any relevant evaluation data.
         """
         raise NotImplementedError
 
-    def evaluate_targets(self, module, module_index, loss_function, targets, candidates):
+    def evaluate_candidates(self, module, module_index, 
+                            loss_function, targets, candidates):
         if torch.is_tensor(candidates):
             candidate_batch = candidates
         else:
@@ -357,7 +355,8 @@ class TargetPropOptimizer:
             target_batch.shape[0]*target_batch.shape[1], 
             *target_batch.shape[2:])
         candidate_batch = candidate_batch.detach()
-        candidate_batch.requires_grad_()
+        if self.criterion == "loss_grad":
+            candidate_batch.requires_grad_()
         output = module(candidate_batch)
         if module_index > 0:
             output = output.view_as(target_batch)
@@ -388,14 +387,13 @@ class TargetPropOptimizer:
         else:
             return losses
 
-    def step(self, train_step, module_index, target, input=None, 
-             label=None, base_targets=None):
-        return self.generate_targets(train_step, module_index, input, 
-                                     label, target, base_targets)
+    def step(self, train_step, module_index, module_target, base_targets=None):
+        return self.generate_target(train_step, module_index, 
+                                    module_target, base_targets)
 
 
-def generate_neighborhood(base_tensor, size, radius, 
-                          masking_weights=None, perturb_base_tensor=None):
+def generate_neighborhood(base_tensor, size, radius, sampling_weights=None, 
+                          perturb_base_tensor=None, use_gpu=True):
     """
     Args:
         base_tensor: torch.LongTensor; base tensor whose 
@@ -404,32 +402,34 @@ def generate_neighborhood(base_tensor, size, radius,
             tensors to generate. 
         radius: Int; (expected) number of values to perturb in 
             generating each neighbor. 
-        masking_weights: torch.FloatTensor; weights for randomly sampling 
-            indices to perturb (optional, default: None). 
+        sampling_weights: torch.FloatTensor; weights for randomly sampling 
+            indices to perturb (optional, default: None).
+        perturb_base_tensor: torch.FloatTensor; base tensor for generating 
+            perturbations (optional, default: None).
+        use_gpu: Boolean; indicates whether to generate the neighborhoods 
+            on the a GPU device or not (optional, default: True).  
     Returns:
         A total of 'size' randomly-generated neighbors of base_tensor. 
     """
+    device = torch.device("cuda:0") if use_gpu else torch.device("cpu")
     batch_base = torch.stack([base_tensor]*size)
     sampling_prob = radius / base_tensor.numel()
     if perturb_base_tensor is None:
-        one_tensor = torch.ones(batch_base.shape, device=torch.device("cuda:0"))
+        one_tensor = torch.ones(batch_base.shape, device=device)
     else:
         one_tensor = perturb_base_tensor
     indices = torch.bernoulli(one_tensor*sampling_prob)
-    if masking_weights:
-        batch_mask = torch.stack([masking_weights]*size)
-        sampling_mask = indices.float() * batch_mask
+    if sampling_weights:
+        batch_weights = torch.stack([sampling_weights]*size)
+        sampling_mask = indices.float() * batch_weights
         indices = torch.bernoulli(sampling_mask)  
     neighbourhood = batch_base * (indices*-2 + 1)
     return neighbourhood
 
 
 def get_random_tensor(shape, make01=False, use_gpu=True):
-    if use_gpu:
-        candidate = torch.cuda.FloatTensor(*shape)
-    else:
-        candidate = torch.FloatTensor(*shape)
-    candidate.random_(0,2)
+    device = torch.device("cuda:0") if use_gpu else torch.device("cpu")
+    candidate = torch.randint(0, 2, shape, device=device)
     if not make01:
         candidate.mul_(2)
         candidate.add_(-1)
@@ -452,12 +452,42 @@ def add_dimensions(tensor, k):
     return expanded_tensor
 
 
-class LocalSearchOptimizer(TargetPropOptimizer):
+def multi_split(tensors, sizes):
+    return tuple(torch.split(tensor, sizes) for tensor in tensors)
 
-    def __init__(self, *args, perturb_size=50, candidates=50, 
+
+def splice(tensor, region_indices):
+    regions = region_indices.shape[1]
+    tensor_trunc = tensor.clone().resize_(
+        tensor.shape[0], 
+        regions*(tensor.shape[1]//regions), 
+        *tensor.shape[2:])
+    missing_indices = tensor.shape[1] % regions
+    tensor_trunc = tensor_trunc.view(
+        tensor_trunc.shape[0], regions, 
+        tensor_trunc.shape[1]//regions,
+        *tensor_trunc.shape[2:])
+    region_indices_expand = add_dimensions(
+        region_indices, tensor_trunc.dim()-2)
+    region_indices_expand = region_indices_expand.expand(
+        *region_indices.shape[:2], *tensor_trunc.shape[2:])
+    tensor_regions = torch.gather(
+        tensor_trunc, 0, region_indices_expand)
+    spliced_trunc = tensor_regions.view(
+        tensor_regions.shape[0], 
+        tensor_regions.shape[1]*tensor_regions.shape[2], 
+        *tensor_regions.shape[3:])
+    spliced = torch.cat(
+        [spliced_trunc, tensor[region_indices[:,-1], -missing_indices:]], dim=1)
+    return spliced
+
+
+class SearchOptimizer(TargetPropOptimizer):
+
+    def __init__(self, *args, perturb_scheduler=lambda x, y, z: 1000, candidates=50, 
                  iterations=10, searches=1, search_type="beam", **kwargs):
         super().__init__(*args, **kwargs)
-        self.perturb_size = perturb_size
+        self.perturb_scheduler = perturb_scheduler
         self.candidates = candidates
         self.iterations = iterations
         self.searches = searches
@@ -466,224 +496,109 @@ class LocalSearchOptimizer(TargetPropOptimizer):
         # To save a little time, create perturbation tensors beforehand:
         self.perturb_base_tensors = [
             torch.ones([self.candidates] + shape, device=torch.device("cuda:0"))
-            for shape in self.sizes]
+            for shape in self.shapes]
 
-    def find_candidates(self, module_index, target, train_step, base_candidates=None):
+    def generate_candidates(self, parent_candidates, parameters, 
+                            base_perturb_tensors=None, sampling_weights=None):
+        candidates = []
+        for candidate, (count, perturb_size), perturb_tensor in zip(
+                parent_candidates, parameters, base_perturb_tensors):
+            if count == 0:
+                raise RuntimeError("Candidate generation count should be nonzero.")
+            else:
+                candidates.append(candidate.unsqueeze(0))
+                candidates.append(generate_neighborhood(
+                    candidate, count, perturb_size, 
+                    perturb_base_tensor=perturb_tensor, 
+                    sampling_weights=sampling_weights))
+        return torch.cat(candidates)
+
+    def find_candidates(self, module_index, module_target, 
+                        train_step, base_candidates=None):
         loss_function = self.loss_functions[module_index]
         module = self.modules[module_index]
         if module_index > 0:
-            target = target.float()
+            module_target = module_target.float()
             loss_function = partial(soft_hinge_loss, reduce_=False)
-        targets = torch.stack([target]*(self.candidates 
+        target_batch = torch.stack([module_target]*(self.candidates 
             + (len(base_candidates) if base_candidates is not None else 1)))
 
-        candidates = base_candidates
-        perturb_base_tensors = [None]*len(candidates)
-        for i, [candidate, weight, perturb_size] in enumerate(candidates.copy()):
-            candidates[i][1] = round(self.candidates*weight)
-            if candidate is None:
-                candidates[i][0] = get_random_tensor(
-                    self.sizes[module_index], use_gpu=self.use_gpu)
-            if perturb_size is None:
-                candidates[i][2] = self.perturb_size
-            perturb_base_tensors[i] = self.perturb_base_tensors[module_index].clone()
-        candidates = [candidate_tuple for candidate_tuple in candidates 
-                      if round(self.candidates*candidate_tuple[1])]
+        search_parameters = [(round(self.candidates*weight), (self.perturb_scheduler
+                             if perturb_scheduler is None else perturb_scheduler))
+                             for _, weight, perturb_scheduler in base_candidates]
+        parents = [get_random_tensor(self.shapes[module_index], use_gpu=self.use_gpu)
+                   if candidate is None else candidate 
+                   for candidate, _, _ in base_candidates]
+        beam_size = len(parents) if self.search_type == "beam" else 1
+        if len(parents) > 1:
+            perturb_base_tensors = [torch.ones([count] + self.shapes[module_index], 
+                                               device=torch.device("cuda:0"))
+                                    for count, _ in search_parameters]
+        else:
+            perturb_base_tensors = [self.perturb_base_tensors[module_index]]
 
-        # Local search to find better candidate
+        # Search to find good candidate
         for i in range(self.iterations):
-            neighbors = []
-            for j, [candidate, nbhd_size, perturb_size] in enumerate(candidates):
-                if nbhd_size == 0:
-                    raise RuntimeError("Neighborhood size should be nonzero!")
-                else:
-                    neighbors.append(candidate.unsqueeze(0))
-                    neighbors.append(generate_neighborhood(
-                        candidate, nbhd_size, perturb_size, 
-                        perturb_base_tensor=perturb_base_tensors[j]))
-            nbhd_sizes = [size+1 for _, size, _ in candidates]
-            candidate_batch = torch.cat(neighbors)
-            if self.criterion == "loss_grad":
-                candidate_losses, candidate_loss_grad = self.evaluate_targets(
-                    module, module_index, loss_function, targets, candidate_batch)
-            else:
-                candidate_losses = self.evaluate_targets(
-                    module, module_index, loss_function, targets, candidate_batch)
-            if self.search_type == "beam":
-                candidate_losses = [candidate_losses]
-                candidate_groups = [candidate_batch]
-                if self.criterion == "loss_grad":
-                    candidate_loss_grad = [candidate_loss_grad]
-                else:
-                    candidate_loss_grad = [None]
-            else:
-                candidate_losses = torch.split(candidate_losses, nbhd_sizes)
-                candidate_groups = torch.split(candidate_batch, nbhd_sizes)
-                if self.criterion == "loss_grad":
-                    candidate_loss_grad = torch.split(candidate_loss_grad, nbhd_sizes)
-                else:
-                    candidate_loss_grad = [None for i in range(len(candidates))]
-            chosen_candidates, chosen_losses = [], []
-            for j, (losses, loss_grad, candidate_group) in enumerate(
-                    zip(candidate_losses, candidate_loss_grad, candidate_groups)):
-                k = len(candidates) if self.search_type == "beam" else 1
-                if self.criterion == "loss_grad":
-                    region_indices, grad_norms = self.choose_targets(
-                        losses, k, loss_grad)
-                    candidate_group_trunc = candidate_group.clone().resize_(
-                        candidate_group.shape[0], 
-                        self.regions*(candidate_group.shape[1]//self.regions), 
-                        *candidate_group.shape[2:])
-                    missing_indices = candidate_group.shape[1] % self.regions
-                    candidate_group_trunc = candidate_group_trunc.view(
-                        candidate_group_trunc.shape[0], self.regions, 
-                        candidate_group_trunc.shape[1]//self.regions,
-                        *candidate_group_trunc.shape[2:])
-                    region_indices_expand = add_dimensions(
-                        region_indices, candidate_group_trunc.dim()-2)
-                    region_indices_expand = region_indices_expand.expand(
-                        *region_indices.shape[:2], *candidate_group_trunc.shape[2:])
-                    candidate_regions = torch.gather(
-                        candidate_group_trunc, 0, region_indices_expand)
-                    best_candidates_trunc = candidate_regions.view(
-                        candidate_regions.shape[0], 
-                        candidate_regions.shape[1]*candidate_regions.shape[2], 
-                        *candidate_regions.shape[3:])
-                    best_candidates = torch.cat(
-                        [best_candidates_trunc, 
-                         candidate_group[region_indices[:,-1], -missing_indices:]], 
-                         dim=1)
-                else:
-                    candidate_indices, losses = self.choose_targets(
-                        losses, k, loss_grad)
-                    best_candidates = candidate_group[candidate_indices]
-                if self.search_type == "beam":
-                    best_candidates = [
-                        [candidate.squeeze(0), candidates[j][1], candidates[j][2]] 
-                         for j, candidate in enumerate(best_candidates.chunk(k))]
-                else:
-                    best_candidates = [[best_candidates.squeeze(0), 
-                                        candidates[j][1], candidates[j][2]]]
-                chosen_candidates.extend(best_candidates)
-                if self.criterion == "loss_grad":
-                    chosen_losses.extend([None for i in range(k)])
-                else:
-                    chosen_losses.extend(
-                        [loss.squeeze(0) for loss in losses.chunk(k)] 
-                        if self.search_type == "beam" else [losses.squeeze(0)])
-            candidates = chosen_candidates
+            iteration_parameters = [
+                (count, perturb_scheduler(train_step, module_index, i))
+                for count, perturb_scheduler in search_parameters]
+            candidate_batch = self.generate_candidates(
+                parents, iteration_parameters, perturb_base_tensors)
+            loss_data = self.evaluate_candidates(module, module_index, loss_function, 
+                                                 target_batch, candidate_batch)
+            group_data = multi_split(
+                (candidate_batch,) + (loss_data 
+                    if isinstance(loss_data, tuple) else (loss_data,)), 
+                [count+1 for count, _ in iteration_parameters])
+            candidate_batches, loss_data = group_data[0], list(zip(*group_data[1:]))
+            best_candidates = self.choose_candidates(
+                loss_data, candidate_batches, beam_size)
+            parents = [candidate for candidate, loss in best_candidates]
 
-        for [candidate, _, _], loss in zip(candidates, chosen_losses):
-            candidate_tuple = ()
-            if loss is None:
-                candidate_tuple = (candidate.long(), None)
-            else:
-                candidate_tuple = (candidate.long(), loss)
-            self.state["candidates"].append(candidate_tuple)
+        for candidate, loss in best_candidates:
+            self.state["candidates"].append((candidate.long(), loss))
 
-    def generate_targets(self, train_step, module_index, 
-                         input, label, target, base_targets=None):
+    def generate_target(self, train_step, module_index, 
+                        module_target, base_targets=None):
         self.state["candidates"] = []
         for i in range(self.searches):
-            self.find_candidates(module_index, target, train_step, base_targets)
-        index, loss = self.choose_targets(
-            [loss for candidate, loss in self.state["candidates"]])
+            self.find_candidates(module_index, module_target, 
+                                 train_step, base_targets)
+        if self.criterion == "loss":
+            index, loss = min(
+                enumerate([loss for candidate, loss in self.state["candidates"]]),
+                key=lambda element: element[1].item())
+        else:
+            index, loss = 0, None 
         if self.search_type == "parallel":
             self.state["chosen_groups"].append(index)
         return self.state["candidates"][index][0], loss
-    
-    def choose_targets(self, losses, k=1, loss_grad=None):
-        if isinstance(losses, list):
-            if k != 1:
-                raise NotImplementedError("Top-k element retrieval with k > 1 "
-                                          "not implemented for lists.")
-            if any(element is None for element in losses):
-                candidate_indices, top_losses = 0, None
+
+    def choose_candidates(self, loss_data, candidate_batches, beam_size):
+        targets = []
+        for loss_tuple, candidates in zip(loss_data, candidate_batches):
+            # First element of loss_data should be loss tensor
+            losses = loss_tuple[0]
+            top_losses, candidate_indices = torch.topk(
+                losses, beam_size, dim=0, largest=False, sorted=False)
+            if len(loss_tuple) == 1:
+                best_candidates = candidates[candidate_indices]
+                targets.append((best_candidates.squeeze(0), top_losses))
             else:
-                candidate_indices, top_losses = min(
-                    enumerate(losses), key=lambda element: element[1].item())
-        else:
-            if loss_grad is None:
-                top_losses, candidate_indices = torch.topk(
-                    losses, k, dim=0, largest=False, sorted=False)
-            else:
+                # loss and loss grad
+                loss_grad = loss_tuple[1]
+                if beam_size > 1:
+                    raise NotImplementedError("Loss grad eval metric can currently "
+                                              "only be used with beam size == 1.")
                 grad_norm = torch.abs(loss_grad)
                 loss_factors = torch.stack([losses]*self.regions, dim=1) 
                 loss_factors = loss_factors / torch.min(loss_factors)
                 grad_norm = grad_norm * loss_factors  # accounts for loss differences
                 top_grad_norm, top_region_indices = torch.min(
                     grad_norm, dim=0, keepdim=True)
-                if k > 1:
-                    if k > self.regions:
-                        raise NotImplementedError(
-                            "Currently require that the beam size is larger " 
-                            "than the number of sampled candidate regions.")
-                    grad_norm, region_indices = torch.topk(
-                        grad_norm, 2, dim=0, largest=False, sorted=True)
-                    off_best_indices = torch.randperm(self.regions)[:k-1]
-                    raise NotImplementedError
-        if loss_grad is None:
-            return candidate_indices, top_losses
-        else:
-            return top_region_indices, top_grad_norm
-
-
-class NeighbourhoodIterator:
-    
-    def __init__(self, dimensions):
-        self.dimensions = dimensions
-
-    def next(self):
-        """
-        Should return a list of coordinates to flip for next point 
-        in neighbourhood to explore. Returning [] indicates 
-        there are no more neighbours to explore.
-        """
-        raise NotImplementedError
-
-
-class RandomNeighbourhoodIterator(NeighbourhoodIterator):
-
-    def __init__(self, dimension, samples):
-        super().__init__(dimension)
-        self.samples = samples
-        self.x_size = self.dimensions[0]
-        self.y_size = self.dimensions[1]
-        self.sample_count = 0
-
-    def next(self):
-        x = random.randrange(self.x_size)
-        y = random.randrange(self.y_size)
-        self.sample_count += 1
-        if self.sample_count <= self.samples:
-            return [(x,y)]
-        return []
-
-
-class CompleteNeighbourhoodIterator(NeighbourhoodIterator):
-
-    def __init__(self, dimensions):
-        super().__init__(dimensions)
-        self.x_size = self.dimensions[0]
-        self.y_size = self.dimensions[1]
-        self.x = -1
-        self.y = self.y_size-1
-        self.first_next = True
-
-    def next(self):
-        """
-        Returns a list of coordinates to flip for next point 
-        in neighbourhood to explore. Returning [] indicates 
-        there are no more neighbours to explore.
-        """
-        self.y = (self.y + 1) % self.y_size
-        if self.y == 0:
-            self.x = (self.x + 1) % self.x_size
-        if self.x == 0 and self.y == 0:
-            if  not self.first_next:
-                return []
-            self.first_next = False
-        return [(self.x, self.y)]
+                best_candidates = splice(candidates, top_region_indices)
+                targets.append((best_candidates.squeeze(0), None))
+        return targets
 
 
 class Target:
@@ -806,7 +721,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
         modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
         target_optimizer = target_optimizer(
             modules=list(model.all_modules)[::-1],
-            sizes=model.input_sizes[::-1],
+            shapes=model.input_sizes[::-1],
             activations=list(model.all_activations[::-1]),
             loss_functions=[loss_function]*len(model.all_modules),
             use_gpu=use_gpu)
@@ -892,8 +807,9 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         # activation = model.all_activations[len(modules)-1-j-1](
                         #     activations[j+1].detach())
                         targets, target_loss = target_optimizer.step(
-                            train_step, j, targets, label=labels, 
-                            base_targets=[[None, 1/1, 50000] for i in range(1)])
+                            train_step, j, targets, 
+                            base_targets=[[None, 1/1, lambda x, y, z: 500] 
+                                          for i in range(1)])
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
