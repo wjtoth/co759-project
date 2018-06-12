@@ -152,6 +152,8 @@ def main():
             input_shape = (784,)
     elif args.dataset.startswith('cifar'):
         input_shape = (3, 32, 32)
+        if args.model == 'toynet':
+            input_shape = (3072,)
     elif args.dataset == 'svhn':
         input_shape = (3, 40, 40)
     elif args.dataset == 'imagenet':
@@ -169,9 +171,10 @@ def main():
         network = ConvNet8(nonlin=nonlin, input_shape=input_shape, 
                            separate_activations=args.comb_opt)
     elif args.model == 'toynet':
-        if args.dataset not in ['mnist', 'graphs']:
+        if args.dataset not in ['cifar10', 'mnist', 'graphs']:
             raise NotImplementedError(
-                'Toy network can only be trained on MNIST or graph connectivity task.')
+                'Toy network can only be trained on CIFAR10, '
+                'MNIST, or graph connectivity task.')
         network = ToyNet(nonlin=nonlin, input_shape=input_shape,
                          separate_activations=args.comb_opt, 
                          num_classes=num_classes)
@@ -207,7 +210,8 @@ def main():
                     SearchOptimizer, batch_size=args.batch, 
                     criterion="loss", regions=10, 
                     perturb_scheduler=lambda x, y, z: 1000, 
-                    candidates=64, iterations=10, searches=1, search_type="beam")
+                    candidates=64, iterations=10, searches=1, 
+                    search_type="beam", perturb_type="random")
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -312,7 +316,8 @@ class Metrics(dict):
 class TargetPropOptimizer:
     
     def __init__(self, modules, shapes, activations, loss_functions, 
-                 batch_size, state=[], criterion="loss", regions=10, use_gpu=True):
+                 batch_size, state=[], criterion="loss", regions=10, 
+                 requires_grad=False, use_gpu=True):
         self.modules = modules
         self.shapes = [[batch_size] + shape for shape in shapes]
         self.activations = activations
@@ -320,6 +325,7 @@ class TargetPropOptimizer:
         self.state = {}
         self.criterion = criterion
         self.regions = regions
+        self.requires_grad = requires_grad or self.criterion == "loss_grad"
         self.use_gpu = use_gpu
 
     def generate_target(self, train_step, module_index, 
@@ -355,7 +361,7 @@ class TargetPropOptimizer:
             target_batch.shape[0]*target_batch.shape[1], 
             *target_batch.shape[2:])
         candidate_batch = candidate_batch.detach()
-        if self.criterion == "loss_grad":
+        if self.requires_grad:
             candidate_batch.requires_grad_()
         output = module(candidate_batch)
         if module_index > 0:
@@ -373,9 +379,10 @@ class TargetPropOptimizer:
             losses = accuracy_topk(output, target_batch, average=False)
         losses = losses.view(len(candidates), int(np.prod(targets.shape[1:])))
         losses = losses.mean(dim=1)  # mean everything but candidate batch dim
-        if self.criterion == "loss_grad":
+        if self.requires_grad:
             losses.sum(dim=0).backward()
             loss_grad = candidate_batch.grad.view_as(candidates)
+        if self.criterion == "loss_grad":
             loss_grad = loss_grad.view(loss_grad.shape[0], 
                                        int(np.prod(loss_grad.shape[1:])))
             truncated_length = self.regions*(loss_grad.shape[1]//self.regions)
@@ -383,6 +390,7 @@ class TargetPropOptimizer:
             loss_grad = loss_grad.view(loss_grad.shape[0], self.regions, 
                                        loss_grad.shape[1]//self.regions)
             loss_grad = loss_grad.mean(dim=2)
+        if self.requires_grad:
             return losses, loss_grad
         else:
             return losses
@@ -419,7 +427,7 @@ def generate_neighborhood(base_tensor, size, radius, sampling_weights=None,
     else:
         one_tensor = perturb_base_tensor
     indices = torch.bernoulli(one_tensor*sampling_prob)
-    if sampling_weights:
+    if sampling_weights is not None:
         batch_weights = torch.stack([sampling_weights]*size)
         sampling_mask = indices.float() * batch_weights
         indices = torch.bernoulli(sampling_mask)  
@@ -482,16 +490,24 @@ def splice(tensor, region_indices):
     return spliced
 
 
+def normalized_diff(x, y):
+    return torch.abs(x - y) / (2*torch.max(torch.abs(x), torch.abs(y)))
+
+
 class SearchOptimizer(TargetPropOptimizer):
 
     def __init__(self, *args, perturb_scheduler=lambda x, y, z: 1000, candidates=50, 
-                 iterations=10, searches=1, search_type="beam", **kwargs):
+                 iterations=10, searches=1, search_type="beam", 
+                 perturb_type="random", **kwargs):
         super().__init__(*args, **kwargs)
         self.perturb_scheduler = perturb_scheduler
         self.candidates = candidates
         self.iterations = iterations
         self.searches = searches
         self.search_type = search_type
+        self.perturb_type = perturb_type
+        if self.perturb_type == "grad_guided":
+            self.requires_grad = True
         self.state = {"chosen_groups": []}
         # To save a little time, create perturbation tensors beforehand:
         self.perturb_base_tensors = [
@@ -501,16 +517,18 @@ class SearchOptimizer(TargetPropOptimizer):
     def generate_candidates(self, parent_candidates, parameters, 
                             base_perturb_tensors=None, sampling_weights=None):
         candidates = []
-        for candidate, (count, perturb_size), perturb_tensor in zip(
-                parent_candidates, parameters, base_perturb_tensors):
+        data = enumerate(zip(parent_candidates, parameters, base_perturb_tensors))
+        for i, (candidate, (count, perturb_size), perturb_tensor) in data:
             if count == 0:
                 raise RuntimeError("Candidate generation count should be nonzero.")
             else:
+                sample_tensor = (sampling_weights[i] 
+                    if sampling_weights is not None else None)
                 candidates.append(candidate.unsqueeze(0))
                 candidates.append(generate_neighborhood(
                     candidate, count, perturb_size, 
                     perturb_base_tensor=perturb_tensor, 
-                    sampling_weights=sampling_weights))
+                    sampling_weights=sample_tensor))
         return torch.cat(candidates)
 
     def find_candidates(self, module_index, module_target, 
@@ -538,12 +556,14 @@ class SearchOptimizer(TargetPropOptimizer):
             perturb_base_tensors = [self.perturb_base_tensors[module_index]]
 
         # Search to find good candidate
+        sampling_weights = None
         for i in range(self.iterations):
             iteration_parameters = [
                 (count, perturb_scheduler(train_step, module_index, i))
                 for count, perturb_scheduler in search_parameters]
             candidate_batch = self.generate_candidates(
-                parents, iteration_parameters, perturb_base_tensors)
+                parents, iteration_parameters, 
+                perturb_base_tensors, sampling_weights)
             loss_data = self.evaluate_candidates(module, module_index, loss_function, 
                                                  target_batch, candidate_batch)
             group_data = multi_split(
@@ -553,8 +573,12 @@ class SearchOptimizer(TargetPropOptimizer):
             candidate_batches, loss_data = group_data[0], list(zip(*group_data[1:]))
             best_candidates = self.choose_candidates(
                 loss_data, candidate_batches, beam_size)
+            if self.perturb_type == "grad_guided":
+                sampling_weights = [normalized_diff(loss_grad, candidate) 
+                                    for candidate, _, loss_grad in best_candidates]
+                best_candidates = [(candidate, loss) 
+                                   for candidate, loss, _ in best_candidates]
             parents = [candidate for candidate, loss in best_candidates]
-
         for candidate, loss in best_candidates:
             self.state["candidates"].append((candidate.long(), loss))
 
@@ -581,10 +605,7 @@ class SearchOptimizer(TargetPropOptimizer):
             losses = loss_tuple[0]
             top_losses, candidate_indices = torch.topk(
                 losses, beam_size, dim=0, largest=False, sorted=False)
-            if len(loss_tuple) == 1:
-                best_candidates = candidates[candidate_indices]
-                targets.append((best_candidates.squeeze(0), top_losses))
-            else:
+            if self.criterion == "loss_grad":
                 # loss and loss grad
                 loss_grad = loss_tuple[1]
                 if beam_size > 1:
@@ -598,6 +619,14 @@ class SearchOptimizer(TargetPropOptimizer):
                     grad_norm, dim=0, keepdim=True)
                 best_candidates = splice(candidates, top_region_indices)
                 targets.append((best_candidates.squeeze(0), None))
+            else:
+                best_candidates = candidates[candidate_indices]
+                if self.perturb_type == "grad_guided":
+                    top_loss_grads = loss_tuple[1][candidate_indices]
+                    targets.append((best_candidates.squeeze(0), 
+                                    top_losses, top_loss_grads.squeeze(0)))
+                else:
+                    targets.append((best_candidates.squeeze(0), top_losses))
         return targets
 
 
@@ -764,7 +793,10 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 try:
                     inputs = inputs.view(batch_size, 784)
                 except RuntimeError:
-                    inputs = inputs.view(batch_size, 15)
+                    try:
+                        inputs = inputs.view(batch_size, 15)
+                    except RuntimeError:
+                        inputs = inputs.view(batch_size, 3072)
             train_step = epoch*batches + i
             if i % 10 == 1:
                 last_time = eval_step(model, inputs, labels, loss_function, 
@@ -890,7 +922,10 @@ def evaluate(model, dataset_loader, loss_function,
             try:
                 inputs = inputs.view(batch_size, 784)
             except RuntimeError:
-                inputs = inputs.view(batch_size, 15)
+                try:
+                    inputs = inputs.view(batch_size, 15)
+                except RuntimeError:
+                    inputs = inputs.view(batch_size, 3072)
         outputs = model(inputs)
         loss = loss_function(outputs, labels).mean().item()
         total_loss += loss
