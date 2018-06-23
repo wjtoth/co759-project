@@ -73,7 +73,7 @@ def main():
                         help='if specified, combinatorial optimization methods ' 
                              'are used for target setting')
     parser.add_argument('--comb-opt-method', type=str, default='local_search',
-                        choices=('local_search', 'genetic'))
+                        choices=('local_search', 'genetic', 'rand_grad'))
     parser.add_argument('--target-momentum', action='store_true', default=False,
                         help='if specified, target momentum is used. '
                              'Note: only supported with gradient-based targetprop')
@@ -113,8 +113,14 @@ def main():
     # computation arguments
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='if specified, use CPU only')
+    parser.add_argument('--multi-gpu', action='store_true', default=False,
+                        help='if specified, use all available GPUs')
     parser.add_argument('--seed', type=int, default=468412397,
                         help='random seed')
+
+    # logging arguments
+    parser.add_argument('--tb-logging', action='store_true', default=False,
+                        help='if specific, enable logging Tensorboard summaries')
     
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
@@ -188,9 +194,11 @@ def main():
         network.needs_backward_twice = tp.needs_backward_twice(args.grad_tp_rule)
     if args.cuda:
         network = network.cuda()
+    if args.multi_gpu:
+        network = nn.DataParallel(
+            network, device_ids=list(range(torch.cuda.device_count())))
 
-    #tb_logger = TensorBoardLogger('new_logs')
-    tb_logger = None
+    tb_logger = TensorBoardLogger('new_logs') if args.tb_logging else None
 
     if args.no_train:
         print('Loading from last checkpoint...')
@@ -220,6 +228,10 @@ def main():
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
                     parents=5, generations=10, populations=1)
+            elif args.comb_opt_method == 'rand_grad':
+                target_optimizer = partial(
+                    RandomGradOptimizer, batch_size=args.batch, 
+                    candidates=64, iterations=10, searches=1)
             else:
                 raise NotImplementedError
         else:
@@ -647,6 +659,49 @@ class SearchOptimizer(TargetPropOptimizer):
         return targets
 
 
+class RandomGradOptimizer(TargetPropOptimizer):
+
+    def __init__(self, *args, candidates=50, iterations=10, searches=1, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.candidates = candidates
+        self.iterations = iterations
+        self.searches = searches  
+        self.requires_grad = True
+        self.state = {"chosen_groups": []}
+
+    def find_candidates(self, module_index, module_target, 
+                        train_step, base_candidates=None):
+        loss_function = self.loss_functions[module_index]
+        module = self.modules[module_index]
+        if module_index > 0:
+            module_target = module_target.float()
+            loss_function = partial(soft_hinge_loss, reduce_=False)
+        target_batch = torch.stack([module_target]*self.candidates)
+
+        parents = [get_random_tensor(self.shapes[module_index], use_gpu=self.use_gpu)
+                   for i in range(self.candidates)]
+        candidate_batch = torch.stack(parents, dim=0)
+        for i in range(self.iterations):
+            loss_grad = self.evaluate_candidates(
+                module, module_index, loss_function, target_batch, candidate_batch)[1]
+            if i == 0:
+                no_threshold_batch = -loss_grad
+            else:
+                learning_rate = (self.iterations - i) / self.iterations
+                no_threshold_batch = no_threshold_batch - (learning_rate*loss_grad)
+            candidate_batch = torch.sign(no_threshold_batch)
+        candidate = torch.sign(torch.mean(candidate_batch, 0))
+        self.state["candidates"].append(candidate.long())
+
+    def generate_target(self, train_step, module_index, 
+                        module_target, base_targets=None):
+        self.state["candidates"] = []
+        for i in range(self.searches):
+            self.find_candidates(module_index, module_target, 
+                                 train_step, base_targets)
+        return self.state["candidates"][0], None
+
+
 class Target:
 
     def __init__(self, size, random=True, use_gpu=True):
@@ -1047,15 +1102,20 @@ def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
 
 
 def correct_format(row_string):
+    # Remove delimiters and correct spacing
     corrected_string = row_string.replace("[", "").replace("]", "").strip()
-    corrected_string = re.sub(",(?: |  )", " ", corrected_string)
+    corrected_string = re.sub(r",(?: |  )", " ", corrected_string)
+    # Remove scientific notation
+    values = re.split(r" +", corrected_string)
+    corrected_string = " ".join([str(float(value)) for value in values])
+    corrected_string = re.sub(r" (?!-)", "  ", corrected_string)
     return corrected_string
 
 
 def store_parameters(model, label, train_step, file_prefix, layer=2):
     torch.set_printoptions(threshold=1000000, linewidth=1000000)
     parameters = list(model.parameters())
-    weight_matrix = parameters[2*(layer-1)]
+    weight_matrix = parameters[2*(layer-1)].transpose(0, 1)
     bias_vector = parameters[2*(layer-1)+1]
     weight_rows = re.findall(r"\[.*?\]", str(weight_matrix))
     bias_rows = re.findall(r"\[.*?\]", str(bias_vector))
