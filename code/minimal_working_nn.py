@@ -120,7 +120,10 @@ def main():
 
     # logging arguments
     parser.add_argument('--tb-logging', action='store_true', default=False,
-                        help='if specific, enable logging Tensorboard summaries')
+                        help='if specified, enable logging Tensorboard summaries')
+    parser.add_argument('--store-checkpoints', action='store_true', default=False, 
+                        help='if specified, enables storage of the current model ' 
+                             'and training parameters at each epoch')
     
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
@@ -223,7 +226,8 @@ def main():
                     criterion="loss", regions=10, 
                     perturb_scheduler=lambda x, y, z: 1000, 
                     candidates=64, iterations=10, searches=1, 
-                    search_type="beam", perturb_type="grad_guided")
+                    search_type="beam", perturb_type="grad_guided",
+                    candidate_type="grad", candidate_grad_delay=0)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -506,12 +510,12 @@ def splice(tensor, region_indices):
     return spliced
 
 
-def normalized_diff(x, y):
+def normalized_diff_old(x, y):
     sign_match = torch.eq(x.sign(), y.sign()).float()
     return sign_match * (torch.abs(x + y) / (2*torch.max(torch.abs(x), torch.abs(y))))    
 
 
-def normalized_diff2(x, y):
+def normalized_diff(x, y):
     sign_match = torch.eq(x.sign(), y.sign()).float()
     shifted_norm = torch.abs(x) + (3/5)
     return sign_match * torch.clamp(shifted_norm, 0, 1)
@@ -519,9 +523,10 @@ def normalized_diff2(x, y):
 
 class SearchOptimizer(TargetPropOptimizer):
 
-    def __init__(self, *args, perturb_scheduler=lambda x, y, z: 1000, candidates=50, 
+    def __init__(self, *args, perturb_scheduler=lambda x, y, z: 1000, candidates=64, 
                  iterations=10, searches=1, search_type="beam", 
-                 perturb_type="random", **kwargs):
+                 perturb_type="random", candidate_type="random", 
+                 candidate_grad_delay=0, **kwargs):
         super().__init__(*args, **kwargs)
         self.perturb_scheduler = perturb_scheduler
         self.candidates = candidates
@@ -529,7 +534,9 @@ class SearchOptimizer(TargetPropOptimizer):
         self.searches = searches
         self.search_type = search_type
         self.perturb_type = perturb_type
-        if self.perturb_type == "grad_guided":
+        self.candidate_type = candidate_type
+        self.candidate_grad_delay = candidate_grad_delay
+        if self.perturb_type == "grad_guided" or self.candidate_type == "grad":
             self.requires_grad = True
         self.state = {"chosen_groups": []}
         # To save a little time, create perturbation tensors beforehand:
@@ -562,7 +569,7 @@ class SearchOptimizer(TargetPropOptimizer):
             module_target = module_target.float()
             loss_function = partial(soft_hinge_loss, reduce_=False)
         target_batch = torch.stack([module_target]*(self.candidates 
-            + (len(base_candidates)+1 if base_candidates is not None else 1+1)))
+            + (len(base_candidates) if base_candidates is not None else 1)))
 
         search_parameters = [(round(self.candidates*weight), (self.perturb_scheduler
                              if perturb_scheduler is None else perturb_scheduler))
@@ -584,27 +591,34 @@ class SearchOptimizer(TargetPropOptimizer):
             iteration_parameters = [
                 (count, perturb_scheduler(train_step, module_index, i))
                 for count, perturb_scheduler in search_parameters]
-            candidate_batch = self.generate_candidates(
-                parents, iteration_parameters, 
-                perturb_base_tensors, sampling_weights)
-            if i != 0:
-                candidate_batch = torch.cat(
-                    [candidate_batch, torch.sign(-best_loss_grad).unsqueeze(0)])
-            loss_data = self.evaluate_candidates(
-                module, module_index, loss_function, 
-                target_batch if i != 0 else target_batch.narrow(
-                    0, 0, target_batch.shape[0]-1), candidate_batch)
+            if self.candidate_grad_delay == i and self.candidate_type == "grad":
+                if i == 0:
+                    # Assumes first parent is activation
+                    loss_grad = [self.evaluate_candidates(
+                        module, module_index, loss_function, 
+                        module_target.unsqueeze(0), parents[0].unsqueeze(0))[1]]
+                else:
+                    loss_grad = group_data[2]
+                candidate_batch = -torch.sign(torch.cat(loss_grad, dim=0))
+                parents = ([torch.sign(torch.mean(candidate_batch, 0))] 
+                           + parents[1:] if i == 0 else [])
+                continue
+            else:
+                candidate_batch = self.generate_candidates(
+                    parents, iteration_parameters, 
+                    perturb_base_tensors, sampling_weights)
+            loss_data = self.evaluate_candidates(module, module_index, loss_function, 
+                                                 target_batch, candidate_batch)
             group_data = multi_split(
                 (candidate_batch,) + (loss_data 
                     if isinstance(loss_data, tuple) else (loss_data,)), 
-                [count+1 if i == 0 else count+2 for count, _ in iteration_parameters])
+                [count+1 for count, _ in iteration_parameters])
             candidate_batches, loss_data = group_data[0], list(zip(*group_data[1:]))
             best_candidates = self.choose_candidates(
                 loss_data, candidate_batches, beam_size)
             if self.perturb_type == "grad_guided":
-                sampling_weights = [normalized_diff2(loss_grad, candidate) 
+                sampling_weights = [normalized_diff(loss_grad, candidate) 
                                     for candidate, _, loss_grad in best_candidates]
-                best_loss_grad = best_candidates[0][2]
                 best_candidates = [(candidate, loss) 
                                    for candidate, loss, _ in best_candidates]
             parents = [candidate for candidate, loss in best_candidates]
@@ -661,7 +675,7 @@ class SearchOptimizer(TargetPropOptimizer):
 
 class RandomGradOptimizer(TargetPropOptimizer):
 
-    def __init__(self, *args, candidates=50, iterations=10, searches=1, **kwargs):
+    def __init__(self, *args, candidates=64, iterations=10, searches=1, **kwargs):
         super().__init__(*args, **kwargs)
         self.candidates = candidates
         self.iterations = iterations
@@ -853,10 +867,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
         last_time = time()
         model.train()
         for i, batch in enumerate(train_dataset_loader):
-            if args.dataset == 'graphs':
-                inputs, labels = batch
-            else:
-                inputs, labels, _ = batch
+            inputs, labels = batch[0], batch[1]
             if inputs.shape[0] != batch_size:
                 continue
             if use_gpu:
@@ -909,16 +920,16 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         logger.scalar_summary(
                             "train/loss_delta", loss_delta.item(), train_step)
                     if j != len(modules)-1:
-                        # activation = model.all_activations[len(modules)-1-j-1](
-                        #     activations[j+1].detach())
+                        activation = model.all_activations[len(modules)-1-j-1](
+                            activations[j+1].detach())
                         if args.model == "convnet4":
-                            perturb_sizes = [7000, 15000, 30000]
+                            perturb_sizes = [5000, 12000, 20000]
                         elif args.model == "toynet":
-                            perturb_sizes = [1000]
+                            perturb_sizes = [500]
+                        perturb_scheduler = lambda x, y, z: perturb_sizes[-y-1]
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, 
-                            base_targets=[[None, 1/1, lambda x, y, z: perturb_sizes[-y-1]]
-                                          for i in range(1)])
+                            base_targets=[[activation, 1/1, perturb_scheduler]])
                     if print_param_info and i % 100 == 1:
                         layer = len(modules)-1-j
                         for k, param in enumerate(module.parameters()):
@@ -946,10 +957,9 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
         with torch.no_grad():
             evaluate(model, eval_dataset_loader, loss_function, 
                      eval_metrics, logger, train_step, log=True, use_gpu=use_gpu)
-        # store_checkpoint(model, optimizer, args, training_metrics, 
-        #                  eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
-        if target_optimizer is not None:
-            print(Counter(target_optimizer.state["chosen_groups"][-batches:]), "\n")
+        if args.store_checkpoints:
+            store_checkpoint(model, optimizer, args, training_metrics, 
+                             eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
 
 
 def eval_step(model, inputs, labels, loss_function, training_metrics, 
