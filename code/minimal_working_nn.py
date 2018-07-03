@@ -201,12 +201,12 @@ def main():
         network = nn.DataParallel(
             network, device_ids=list(range(torch.cuda.device_count())))
 
-    tb_logger = TensorBoardLogger('new_logs') if args.tb_logging else None
+    log_dir = os.path.join(os.path.join(os.curdir, 'logs'), str(round(time())))
+    tb_logger = TensorBoardLogger(log_dir) if args.tb_logging else None
 
     if args.no_train:
         print('Loading from last checkpoint...')
-        checkpoint_state = load_checkpoint(
-            os.path.join(os.curdir, 'new_logs'), args=args)
+        checkpoint_state = load_checkpoint(os.path.join(os.curdir, 'logs'))
         model_state = checkpoint_state['model_state']
         network.load_state_dict(model_state)
     else:
@@ -225,9 +225,9 @@ def main():
                     SearchOptimizer, batch_size=args.batch, 
                     criterion="loss", regions=10, 
                     perturb_scheduler=lambda x, y, z: 1000, 
-                    candidates=64, iterations=1, searches=1, 
+                    candidates=64, iterations=10, searches=1, 
                     search_type="beam", perturb_type="grad_guided",
-                    candidate_type="grad", candidate_grad_delay=0)
+                    candidate_type="grad", candidate_grad_delay=1)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -243,7 +243,8 @@ def main():
 
         train(network, train_loader, val_loader, criterion, optimizer, 
               args.epochs, num_classes, target_optimizer=target_optimizer, 
-              logger=tb_logger, use_gpu=args.cuda, args=args, print_param_info=False)
+              log_dir=log_dir, logger=tb_logger, use_gpu=args.cuda, 
+              args=args, print_param_info=False)
         print('Finished training\n')
 
     if args.adv_eval:
@@ -731,11 +732,10 @@ def print_param_info(module, layer):
 
 
 def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
-          optimizer, epochs, num_classes, target_optimizer=None, logger=None,
-          use_gpu=True, args=None, print_param_info=False):
+          optimizer, epochs, num_classes, target_optimizer=None, 
+          log_dir=None, logger=None, use_gpu=True, args=None, print_param_info=False):
     model.train()
     batch_size = train_dataset_loader.batch_size
-    batches = len(train_dataset_loader)
     train_per_layer = target_optimizer is not None
     if train_per_layer:
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
@@ -751,9 +751,8 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             use_gpu=use_gpu)
     else:
         optimizer = optimizer(model.parameters())
-        lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, args.lr_decay_epochs, 
-                                                      gamma=args.lr_decay_factor)
-        lr_schedulers = [lr_scheduler]
+        lr_schedulers = [optim.lr_scheduler.MultiStepLR(
+            optimizer, args.lr_decay_epochs, gamma=args.lr_decay_factor)]
         if args.target_momentum:
             activations = list(chain.from_iterable(
                 [[child for i, child in enumerate(module) if i == len(module)-1] 
@@ -761,7 +760,9 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             for i, activation in enumerate(activations):
                 activation.initialize_momentum_state(
                     [batch_size] + model.input_sizes[i+1], num_classes)
-    training_metrics = Metrics({'dataset_batches': batches,
+    extra_args = target_optimizer.__dict__ if args.comb_opt else None
+    store_run_info(args, log_dir, extra_args=extra_args)
+    training_metrics = Metrics({'dataset_batches': len(train_dataset_loader),
                                 'loss': [], 'accuracy': [], 
                                 'accuracy_top5': [], 'steps/sec': []})
     eval_metrics = Metrics({'dataset_batches': len(eval_dataset_loader), 
@@ -789,7 +790,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         inputs = inputs.view(batch_size, 15)
                     except RuntimeError:
                         inputs = inputs.view(batch_size, 3072)
-            train_step = epoch*batches + i
+            train_step = epoch*len(train_dataset_loader) + i
             if i % 10 == 1:
                 last_time = eval_step(model, inputs, labels, loss_function, 
                                       training_metrics, logger, epoch, 
@@ -816,19 +817,13 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         loss = soft_hinge_loss(outputs, targets.detach().float()).mean()
                     loss.backward()
                     optimizer.step()
-                    if j == 1 and i % 5 == 1 and False:
-                        # Check loss change after SGD update step
-                        updated_loss = loss_function(model(inputs), labels).mean()
-                        loss_delta = updated_loss - output_loss
-                        logger.scalar_summary(
-                            "train/loss_delta", loss_delta.item(), train_step)
                     if j != len(modules)-1:
                         activation = model.all_activations[len(modules)-1-j-1](
                             activations[j+1].detach())
                         if args.model == "convnet4":
                             perturb_sizes = [7000, 15000, 30000]
                         elif args.model == "toynet":
-                            perturb_sizes = [1000]
+                            perturb_sizes = [500]
                         perturb_scheduler = lambda x, y, z: perturb_sizes[-y-1]
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, 
@@ -838,10 +833,8 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             if (train_step in [0, 10, 100, 1000, 10000, 50000] 
                     and args.model == "toynet" and args.collect_params):
                 target_loss = loss_function(modules[0][0](targets.float()), labels)
-                store_step_data(model, labels[10], target_loss[10].item(), train_step, 
-                                "model_data\\" + args.model + "_" + args.dataset
-                                + "bs" + str(args.batch) + "_" + args.nonlin 
-                                + "_" + ("comb" if args.comb_opt else "grad"))
+                store_step_data(model, labels[10], target_loss[10].item(), 
+                                train_step, os.path.join(log_dir, "run_data"))
             if not train_per_layer:
                 if args.target_momentum:
                     for activation in activations:
@@ -859,7 +852,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                      eval_metrics, logger, train_step, log=True, use_gpu=use_gpu)
         if args.store_checkpoints:
             store_checkpoint(model, optimizer, args, training_metrics, 
-                             eval_metrics, epoch, os.path.join(os.curdir, 'new_logs'))
+                             eval_metrics, epoch, log_dir)
 
 
 def eval_step(model, inputs, labels, loss_function, training_metrics, 
@@ -961,11 +954,19 @@ def evaluate_adversarially(model, dataset, criterion, attack,
     return failure_rate
 
 
+def store_run_info(terminal_args, log_dir, extra_args=None):
+    if extra_args is None:
+        extra_args = {}
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    hparams = terminal_args.__dict__
+    hparams.update(extra_args)
+    with open(os.path.join(log_dir, "hparams.txt"), "w+") as info_file:
+        print(hparams, file=info_file)
+
+
 def store_checkpoint(model, optimizer, terminal_args, training_metrics, 
-                     eval_metrics, epoch, root_log_dir):
-    dataset_dir = os.path.join(root_log_dir, terminal_args.dataset)
-    log_dir = os.path.join(dataset_dir, terminal_args.model + '-' + terminal_args.nonlin 
-        + '-bs' + str(terminal_args.batch) + '-' + terminal_args.loss)
+                     eval_metrics, epoch, log_dir):
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     checkpoint_state = {
@@ -975,9 +976,9 @@ def store_checkpoint(model, optimizer, terminal_args, training_metrics,
         'training_metrics': training_metrics,
         'eval_metrics': eval_metrics,
         'epoch': epoch,
-        'save_time': time()
+        'save_time': time(),
     }
-    file_name = 'model_checkpoint_epoch{}.state'.format(epoch)
+    file_name = 'checkpoint_epoch{}.state'.format(epoch)
     file_path = os.path.join(log_dir, file_name)
     torch.save(checkpoint_state, file_path)
     print('\nModel checkpoint saved at: ' 
@@ -985,26 +986,20 @@ def store_checkpoint(model, optimizer, terminal_args, training_metrics,
     # delete old checkpoint
     if epoch > 9:
         previous = os.path.join(
-            log_dir, 'model_checkpoint_epoch{}.state'.format(epoch-10))
+            log_dir, 'checkpoint_epoch{}.state'.format(epoch-10))
         if os.path.exists(previous) and os.path.isfile(previous):
             os.remove(previous)
 
 
-def load_checkpoint(root_log_dir, args=None, log_dir=None, epoch=None):
-    if args is None and log_dir is None:
-        raise ValueError('Need at least one argument to locate the checkpoint.')
-    if args is not None:
-        log_dir = os.path.join(os.path.join(root_log_dir, args.dataset), 
-                               args.model + '-' + args.nonlin + '-bs' 
-                               + str(args.batch) + '-' + args.loss)
+def load_checkpoint(log_dir, epoch=None):
     if epoch is None:
         checkpoint_files = [file_name for file_name in os.listdir(log_dir)
-                            if file_name.startswith('model_checkpoint')]
+                            if file_name.startswith('checkpoint')]
         checkpoint_files.sort()
     else:
         checkpoint_files = [
             file_name for file_name in os.listdir(log_dir)
-            if file_name.startswith('model_checkpoint_epoch{}'.format(epoch))
+            if file_name.startswith('checkpoint_epoch{}'.format(epoch))
         ]
 
     checkpoint_state = torch.load(os.path.join(log_dir, checkpoint_files[-1]))
@@ -1022,19 +1017,18 @@ def correct_format(row_string):
     return corrected_string
 
 
-def store_step_data(model, label, target_loss, train_step, file_prefix, layer=2):
+def store_step_data(model, label, target_loss, train_step, log_dir, layer=2):
     torch.set_printoptions(threshold=1000000, linewidth=1000000)
     parameters = list(model.parameters())
     weight_matrix = parameters[2*(layer-1)].transpose(0, 1)
     bias_vector = parameters[2*(layer-1)+1]
     weight_rows = re.findall(r"\[.*?\]", str(weight_matrix))
     bias_rows = re.findall(r"\[.*?\]", str(bias_vector))
-    weight_file_name = file_prefix + "_weight_step" + str(train_step) + ".txt"
+    weight_file_name = os.path.join(log_dir, "weight_step" + str(train_step) + ".txt")
     with open(weight_file_name, "w+") as weight_file:
         for row in weight_rows:
             print(correct_format(row), file=weight_file)
-    bias_file_name = file_prefix + "_bias_step" + str(train_step) + ".txt"
-    with open(bias_file_name, "w+") as bias_file:
+    with open(weight_file_name.replace("weight", "bias"), "w+") as bias_file:
         for row in bias_rows: 
             print(correct_format(row), file=bias_file)
     if label.numel() == 1:
@@ -1042,12 +1036,10 @@ def store_step_data(model, label, target_loss, train_step, file_prefix, layer=2)
         label_vector[label] = 1
         label = label_vector
     label_rows = re.findall(r"\[.*?\]", str(label))
-    label_file_name = file_prefix + "_target_step" + str(train_step) + ".txt"
-    with open(label_file_name, "w+") as label_file:
+    with open(weight_file_name.replace("weight", "target"), "w+") as label_file:
         for row in label_rows:
             print(correct_format(row), file=label_file)
-    loss_file_name = file_prefix + "_loss_step" + str(train_step) + ".txt"
-    with open(loss_file_name, "w+") as loss_file:
+    with open(weight_file_name.replace("weight", "loss"), "w+") as loss_file:
         print(target_loss, file=loss_file)
     torch.set_printoptions(profile="default")
 
