@@ -225,9 +225,9 @@ def main():
                     SearchOptimizer, batch_size=args.batch, 
                     criterion="loss", regions=10, 
                     perturb_scheduler=lambda x, y, z: 1000, 
-                    candidates=64, iterations=10, searches=1, 
+                    candidates=128, iterations=25, searches=1, 
                     search_type="beam", perturb_type="grad_guided",
-                    candidate_type="grad", candidate_grad_delay=0)
+                    candidate_type="grad", candidate_grad_delay=1)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -601,7 +601,7 @@ class SearchOptimizer(TargetPropOptimizer):
                     loss_grad = group_data[2]
                 candidate_batch = -torch.sign(torch.cat(loss_grad, dim=0))
                 parents = ([torch.sign(torch.mean(candidate_batch, 0))] 
-                           + parents[1:] if i == 0 else [])
+                           + (parents[1:] if i == 0 else []))
                 continue
             else:
                 candidate_batch = self.generate_candidates(
@@ -716,109 +716,17 @@ class RandomGradOptimizer(TargetPropOptimizer):
         return self.state["candidates"][0], None
 
 
-class Target:
-
-    def __init__(self, size, random=True, use_gpu=True):
-        self.use_gpu = use_gpu
-        self.size = size
-        if self.use_gpu:
-            self.values = torch.cuda.FloatTensor(*self.size)
-        else:
-            self.values = torch.FloatTensor(*self.size)
-        if random:
-            self.values.random_(0,2)
-            self.values.mul_(2)
-            self.values.add_(-1)
-        else:
-            self.values.zero_()
-        
-    def crossover(self, parent1, parent2):
-        x0 = random.randint(1, self.size[0]-2)
-        y0 = random.randint(1, self.size[1]-2)
-           
-        self.values[:x0,:y0] = parent1.values[:x0,:y0] 
-        self.values[x0+1:,:y0] = parent1.values[x0+1:,:y0] 
-
-        self.values[:x0,y0+1:] = parent2.values[:x0,y0+1:] 
-        self.values[x0+1:,y0+1:] = parent2.values[x0+1:,y0+1:] 
-
-
-class GeneticOptimizer(TargetPropOptimizer):
-
-    def __init__(self, modules, sizes, loss_functions, batch_size, candidates=10, 
-                 parents=5, generations=5, populations=1, state=[], use_gpu=True):
-        super().__init__(modules, sizes, loss_functions, batch_size, state, use_gpu)
-        self.candidates = candidates
-        self.parents = parents
-        self.generations = generations
-        self.populations = populations
-
-    def generate_candidate(self, module_index, target):
-        loss_function = self.loss_functions[module_index]
-        module = self.modules[module_index]
-        candidate_size = self.sizes[module_index]
-        if module_index > 0:
-            target = target.float()
-            loss_function = partial(soft_hinge_loss, reduce_=False)
-
-        # generate a population of targets
-        population = []
-        for i in range(self.candidates):
-            # generate a random candidate target
-            candidate = Target(candidate_size, random=True, use_gpu=self.use_gpu)           
-            population.append(candidate)
-        candidate_losses = self.evaluate_targets(
-                module, module_index, loss_function, target, 
-                [target.values for target in population])
-        population = self.filter_targets(population, candidate_losses)
-
-        # main loop
-        for i in range(self.generations):
-            # generate children
-            for j in range(self.candidates):
-                # choose two random parents, and add crossover to population
-                # some other condition for crossing two targets could be used here
-                c1, c2 = None, None
-                while c1 == c2:
-                    c1 = random.randint(0, self.parents-1)
-                    c2 = random.randint(0, self.parents-1)
-                child_candidate = Target(
-                    candidate_size, random=False, use_gpu=self.use_gpu)
-                child_candidate.crossover(population[c1], population[c2])          
-                population.append(child_candidate)
-            candidate_losses = self.evaluate_targets(
-                module, module_index, loss_function, target, 
-                [target.values for target in population])
-            population = self.filter_targets(population, candidate_losses)
-
-        if self.use_gpu:
-            candidate_var = Variable(population[0].values).cuda()
-        else:
-            candidate_var = Variable(population[0].values)
-        self.state["candidates"].append((candidate_var, population[0].loss))
-
-    def generate_targets(self, train_step, module_index, 
-                         input, label, target, base_targets=None):
-        self.state = {"candidates": []}
-        for i in range(0, self.populations):
-            self.generate_candidate(module_index, target)
-        index, loss = self.choose_target(
-            [loss for candidate, loss in self.state["candidates"]])
-        return self.state["candidates"][index][0], loss
-
-    def filter_targets(self, candidates, losses):
-        for i in range(losses.shape[0]):
-            candidates[i].loss = losses[i]
-        candidates.sort(key=lambda target: target.loss.data[0], reverse=False)
-        return candidates[0:self.parents]
-    
-    def choose_target(self, losses):
-        if isinstance(losses, list):
-            candidate_index, loss = min(
-                enumerate(losses), key=lambda element: element[1].data[0])
-        else:
-            loss, candidate_index =  torch.min(losses, 0)
-        return candidate_index, loss
+def print_param_info(module, layer):
+    for k, param in enumerate(module.parameters()):
+        if k == 0:
+            print('\nlayer {0} - weight matrices mean and variance: '
+                  '{1:.8f}, {2:.8f}\n'.format(
+                  layer, torch.mean(param.data), 
+                  torch.std(param.data)))
+            print('layer {0} - gradient mean and variance: '
+                  '{1:.8f}, {2:.8f}\n'.format(
+                  layer, torch.mean(param.grad.data), 
+                  torch.std(param.grad.data)))
 
 
 def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
@@ -885,12 +793,6 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 last_time = eval_step(model, inputs, labels, loss_function, 
                                       training_metrics, logger, epoch, 
                                       i, train_step, last_time)
-            if (train_step in [0, 10, 100, 1000, 10000, 50000] 
-                    and args.model == "toynet" and args.collect_params):
-                store_parameters(model, labels[10], train_step, 
-                                 "model_data\\" + args.model + "_" + args.dataset
-                                 + "bs" + str(args.batch) + "_" + args.nonlin 
-                                 + "_" + ("comb" if args.comb_opt else "grad"))
             targets = labels
             if train_per_layer:
                 # Obtain activations / hidden states
@@ -923,26 +825,22 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         activation = model.all_activations[len(modules)-1-j-1](
                             activations[j+1].detach())
                         if args.model == "convnet4":
-                            perturb_sizes = [5000, 12000, 20000]
+                            perturb_sizes = [7000, 15000, 30000]
                         elif args.model == "toynet":
                             perturb_sizes = [500]
                         perturb_scheduler = lambda x, y, z: perturb_sizes[-y-1]
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, 
-                            base_targets=[[activation, 1/1, perturb_scheduler]])
+                            base_targets=[[None, 1/1, perturb_scheduler]])
                     if print_param_info and i % 100 == 1:
-                        layer = len(modules)-1-j
-                        for k, param in enumerate(module.parameters()):
-                            if k == 0:
-                                print('\nlayer {0} - weight matrices mean and variance: '
-                                      '{1:.8f}, {2:.8f}\n'.format(
-                                      layer, torch.mean(param.data), 
-                                      torch.std(param.data)))
-                                print('layer {0} - gradient mean and variance: '
-                                      '{1:.8f}, {2:.8f}\n'.format(
-                                      layer, torch.mean(param.grad.data), 
-                                      torch.std(param.grad.data)))
-            else:
+                        print_param_metrics(module, len(modules)-1-j)
+            if (train_step in [0, 10, 100, 1000, 10000, 50000] 
+                    and args.model == "toynet" and args.collect_params):
+                store_step_data(model, labels[10], target_loss[10].item(), train_step, 
+                                "model_data\\" + args.model + "_" + args.dataset
+                                + "bs" + str(args.batch) + "_" + args.nonlin 
+                                + "_" + ("comb" if args.comb_opt else "grad"))
+            if not train_per_layer:
                 if args.target_momentum:
                     for activation in activations:
                         activation.batch_labels = targets
@@ -1122,7 +1020,7 @@ def correct_format(row_string):
     return corrected_string
 
 
-def store_parameters(model, label, train_step, file_prefix, layer=2):
+def store_step_data(model, label, target_loss, train_step, file_prefix, layer=2):
     torch.set_printoptions(threshold=1000000, linewidth=1000000)
     parameters = list(model.parameters())
     weight_matrix = parameters[2*(layer-1)].transpose(0, 1)
@@ -1146,6 +1044,9 @@ def store_parameters(model, label, train_step, file_prefix, layer=2):
     with open(label_file_name, "w+") as label_file:
         for row in label_rows:
             print(correct_format(row), file=label_file)
+    loss_file_name = file_prefix + "_loss_step" + str(train_step) + ".txt"
+    with open(loss_file_name, "w+") as loss_file:
+        print(target_loss, file=loss_file)
     torch.set_printoptions(profile="default")
 
 
