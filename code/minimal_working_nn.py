@@ -225,9 +225,9 @@ def main():
                     SearchOptimizer, batch_size=args.batch, 
                     criterion="loss", regions=10, 
                     perturb_scheduler=lambda x, y, z: 1000, 
-                    candidates=128, iterations=25, searches=1, 
+                    candidates=64, iterations=1, searches=1, 
                     search_type="beam", perturb_type="grad_guided",
-                    candidate_type="grad", candidate_grad_delay=1)
+                    candidate_type="grad", candidate_grad_delay=0)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -602,6 +602,7 @@ class SearchOptimizer(TargetPropOptimizer):
                 candidate_batch = -torch.sign(torch.cat(loss_grad, dim=0))
                 parents = ([torch.sign(torch.mean(candidate_batch, 0))] 
                            + (parents[1:] if i == 0 else []))
+                best_candidates = [(parent, None) for parent in parents]
                 continue
             else:
                 candidate_batch = self.generate_candidates(
@@ -634,7 +635,7 @@ class SearchOptimizer(TargetPropOptimizer):
         if self.criterion == "loss":
             index, loss = min(
                 enumerate([loss for candidate, loss in self.state["candidates"]]),
-                key=lambda element: element[1].item())
+                key=lambda element: element[1].item() if element[1] is not None else -1)
         else:
             index, loss = 0, None 
         if self.search_type == "parallel":
@@ -827,7 +828,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         if args.model == "convnet4":
                             perturb_sizes = [7000, 15000, 30000]
                         elif args.model == "toynet":
-                            perturb_sizes = [500]
+                            perturb_sizes = [1000]
                         perturb_scheduler = lambda x, y, z: perturb_sizes[-y-1]
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, 
@@ -836,6 +837,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         print_param_metrics(module, len(modules)-1-j)
             if (train_step in [0, 10, 100, 1000, 10000, 50000] 
                     and args.model == "toynet" and args.collect_params):
+                target_loss = loss_function(modules[0][0](targets.float()), labels)
                 store_step_data(model, labels[10], target_loss[10].item(), train_step, 
                                 "model_data\\" + args.model + "_" + args.dataset
                                 + "bs" + str(args.batch) + "_" + args.nonlin 
