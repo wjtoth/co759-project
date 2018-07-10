@@ -154,7 +154,8 @@ def main():
     elif args.nonlin == 'step11':
         nonlin = partial(Step, make01=False, targetprop_rule=args.grad_tp_rule,
                          use_momentum=args.target_momentum, 
-                         momentum_factor=args.target_momentum_factor)
+                         momentum_factor=args.target_momentum_factor, 
+                         scale_by_grad_out=True)
     elif args.nonlin == 'staircase':
         nonlin = partial(activations.Staircase, targetprop_rule=args.grad_tp_rule,
                          nsteps=5, margin=1, trunc_thresh=2)
@@ -196,11 +197,13 @@ def main():
         network.targetprop_rule = args.grad_tp_rule
         network.needs_backward_twice = tp.needs_backward_twice(args.grad_tp_rule)
     if args.cuda:
+        print("Moving to GPU...")
         network = network.cuda()
     if args.multi_gpu:
         network = nn.DataParallel(
             network, device_ids=list(range(torch.cuda.device_count())))
 
+    print("Setting up logging...")
     log_dir = os.path.join(os.path.join(os.curdir, 'logs'), str(round(time())))
     tb_logger = TensorBoardLogger(log_dir) if args.tb_logging else None
 
@@ -210,13 +213,16 @@ def main():
         model_state = checkpoint_state['model_state']
         network.load_state_dict(model_state)
     else:
+        print("Creating loss function...")
         if args.loss == 'cross_entropy':
             criterion = torch.nn.CrossEntropyLoss(
                 size_average=not args.comb_opt, reduce=not args.comb_opt)
         elif args.loss == 'hinge':
             criterion = partial(multiclass_hinge_loss, reduce_=not args.comb_opt)
+        print("Creating parameter optimizer...")
         optimizer = partial(optim.Adam, lr=0.00025, weight_decay=args.wtdecay)
         if args.comb_opt:
+            print("Creating target optimizer...")
             if args.nonlin != 'step11':
                 raise NotImplementedError(
                     "Discrete opt methods currently only support nonlin = step11.")
@@ -225,9 +231,9 @@ def main():
                     SearchOptimizer, batch_size=args.batch, 
                     criterion="loss", regions=10, 
                     perturb_scheduler=lambda x, y, z: 1000, 
-                    candidates=64, iterations=10, searches=1, 
+                    candidates=64, iterations=1, searches=1, 
                     search_type="beam", perturb_type="grad_guided",
-                    candidate_type="grad", candidate_grad_delay=1)
+                    candidate_type="grad_sampled", candidate_grad_delay=0)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -516,10 +522,16 @@ def normalized_diff_old(x, y):
     return sign_match * (torch.abs(x + y) / (2*torch.max(torch.abs(x), torch.abs(y))))    
 
 
-def normalized_diff(x, y):
+def normalized_diff(x, y, offset=3/5):
     sign_match = torch.eq(x.sign(), y.sign()).float()
-    shifted_norm = torch.abs(x) + (3/5)
+    shifted_norm = torch.abs(x) + offset
     return sign_match * torch.clamp(shifted_norm, 0, 1)
+
+
+def sample_sign(x, y):
+    sampling_weights = normalized_diff(x, y, offset=5/5)
+    sample_base = (torch.bernoulli(sampling_weights)*2) - 1
+    return y * (-sample_base)
 
 
 class SearchOptimizer(TargetPropOptimizer):
@@ -588,11 +600,12 @@ class SearchOptimizer(TargetPropOptimizer):
 
         # Search to find good candidate
         sampling_weights = None
+        best_candidates = [(parent, None) for parent in parents]
         for i in range(self.iterations):
             iteration_parameters = [
                 (count, perturb_scheduler(train_step, module_index, i))
                 for count, perturb_scheduler in search_parameters]
-            if self.candidate_grad_delay == i and self.candidate_type == "grad":
+            if self.candidate_grad_delay == i and self.candidate_type.startswith("grad"):
                 if i == 0:
                     # Assumes first parent is activation
                     loss_grad = [self.evaluate_candidates(
@@ -600,7 +613,13 @@ class SearchOptimizer(TargetPropOptimizer):
                         module_target.unsqueeze(0), parents[0].unsqueeze(0))[1]]
                 else:
                     loss_grad = group_data[2]
-                candidate_batch = -torch.sign(torch.cat(loss_grad, dim=0))
+                candidate_batch = torch.cat(loss_grad, dim=0)
+                if self.candidate_type == "grad_sampled":
+                    # Assumes first parent is activation 
+                    candidate_batch = sample_sign(
+                        candidate_batch, parents[0].unsqueeze(0))
+                else:
+                    candidate_batch = -torch.sign(candidate_batch)
                 parents = ([torch.sign(torch.mean(candidate_batch, 0))] 
                            + (parents[1:] if i == 0 else []))
                 best_candidates = [(parent, None) for parent in parents]
@@ -760,13 +779,17 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             for i, activation in enumerate(activations):
                 activation.initialize_momentum_state(
                     [batch_size] + model.input_sizes[i+1], num_classes)
-    extra_args = target_optimizer.__dict__ if args.comb_opt else None
+    print("Optimizers created.")
+    extra_args = target_optimizer.__dict__.copy() if args.comb_opt else None
+    if "perturb_base_tensor" in extra_args.keys():
+        del extra_args["perturb_base_tensors"]
     store_run_info(args, log_dir, extra_args=extra_args)
     training_metrics = Metrics({'dataset_batches': len(train_dataset_loader),
                                 'loss': [], 'accuracy': [], 
                                 'accuracy_top5': [], 'steps/sec': []})
     eval_metrics = Metrics({'dataset_batches': len(eval_dataset_loader), 
                             'loss': [], 'accuracy': [], 'accuracy_top5': []})
+    print("Beginning training...")
     for epoch in range(epochs):
         for scheduler in lr_schedulers:
             scheduler.step()
@@ -798,28 +821,39 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             targets = labels
             if train_per_layer:
                 # Obtain activations / hidden states
-                activations = []
+                preactivations = []
+                postactivations = []
                 for j, (module, _) in enumerate(modules[::-1]):
                     if j == 0:
                         outputs = module(inputs)
                     else:
-                        outputs = module(model.all_activations[j-1](outputs.detach()))
-                    activations.append(outputs)
-                activations.reverse()
+                        outputs = module(activation)
+                    preactivations.append(outputs)
+                    if j != len(modules)-1:
+                        activation = model.all_activations[j](outputs).detach()
+                        activation.requires_grad_()
+                        postactivations.append(activation)
+                preactivations.reverse()
+                postactivations.reverse()
                 # Then target prop in reverse mode
+                loss_grad = 1
                 for j, (module, optimizer) in enumerate(modules):
                     optimizer.zero_grad()
-                    outputs = activations[j]
+                    outputs = preactivations[j]
                     if j == 0:
                         loss = loss_function(outputs, targets.detach()).mean()
-                        output_loss = loss
                     else:
-                        loss = soft_hinge_loss(outputs, targets.detach().float()).mean()
+                        loss = soft_hinge_loss(
+                            outputs, targets.detach().float(), reduce_=False)
+                        loss *= torch.abs(loss_grad)
+                        loss = loss.mean()
                     loss.backward()
+                    if j != len(modules)-1:
+                        loss_grad = postactivations[j].grad
                     optimizer.step()
                     if j != len(modules)-1:
                         activation = model.all_activations[len(modules)-1-j-1](
-                            activations[j+1].detach())
+                            preactivations[j+1].detach())
                         if args.model == "convnet4":
                             perturb_sizes = [7000, 15000, 30000]
                         elif args.model == "toynet":
@@ -827,7 +861,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         perturb_scheduler = lambda x, y, z: perturb_sizes[-y-1]
                         targets, target_loss = target_optimizer.step(
                             train_step, j, targets, 
-                            base_targets=[[None, 1/1, perturb_scheduler]])
+                            base_targets=[[activation, 1/1, perturb_scheduler]])
                     if print_param_info and i % 100 == 1:
                         print_param_metrics(module, len(modules)-1-j)
             if (train_step in [0, 10, 100, 1000, 10000, 50000] 
