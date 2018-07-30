@@ -180,10 +180,12 @@ def main():
     print('Creating network...')
     if args.model == 'convnet4':
         network = ConvNet4(nonlin=nonlin, input_shape=input_shape, 
-                           separate_activations=args.comb_opt)
+                           separate_activations=args.comb_opt, 
+                           multi_gpu_modules=args.multi_gpu)
     elif args.model == 'convnet8':
         network = ConvNet8(nonlin=nonlin, input_shape=input_shape, 
-                           separate_activations=args.comb_opt)
+                           separate_activations=args.comb_opt, 
+                           multi_gpu_modules=args.multi_gpu)
     elif args.model == 'toynet':
         if args.dataset not in ['cifar10', 'mnist', 'graphs']:
             raise NotImplementedError(
@@ -191,7 +193,8 @@ def main():
                 'MNIST, or graph connectivity task.')
         network = ToyNet(nonlin=nonlin, input_shape=input_shape,
                          separate_activations=args.comb_opt, 
-                         num_classes=num_classes)
+                         num_classes=num_classes, 
+                         multi_gpu_modules=args.multi_gpu)
     network.needs_backward_twice = False
     if args.nonlin.startswith('step') or args.nonlin == 'staircase':
         network.targetprop_rule = args.grad_tp_rule
@@ -199,9 +202,8 @@ def main():
     if args.cuda:
         print("Moving to GPU...")
         network = network.cuda()
-    if args.multi_gpu:
-        network = nn.DataParallel(
-            network, device_ids=list(range(torch.cuda.device_count())))
+    if args.multi_gpu and not args.comb_opt:
+        network = nn.DataParallel(network)
 
     print("Setting up logging...")
     log_dir = os.path.join(os.path.join(os.curdir, 'logs'), str(round(time())))
@@ -1179,7 +1181,7 @@ def store_step_data(model, label, target_loss, train_step, log_dir, layer=2):
 class ToyNet(nn.Module):
 
     def __init__(self, nonlin=nn.ReLU, input_shape=(784,), 
-                 separate_activations=True, num_classes=10):
+                 separate_activations=True, num_classes=10, multi_gpu_modules=False):
         super().__init__()
         self.input_size = input_shape[0]
         self.fc1_size = 100
@@ -1197,13 +1199,18 @@ class ToyNet(nn.Module):
 
         if self.separate_activations:
             del block1['nonlin1']
-            self.all_modules = nn.ModuleList(
-                [nn.Sequential(block1), nn.Sequential(block2)])
+
+        block1 = nn.Sequential(block1)
+        block2 = nn.Sequential(block2)
+        if multi_gpu_modules:
+            block1, block2 = nn.DataParallel(block1), nn.DataParallel(block2)
+
+        if separate_activations:
+            self.all_modules = nn.ModuleList([block1, block2])
             self.all_activations = nn.ModuleList([nonlin(),])
         else:
             self.all_modules = nn.Sequential(OrderedDict([
-                ('block1', nn.Sequential(block1)),
-                ('block2', nn.Sequential(block2)),
+                ('block1', block1), ('block2', block2),
             ]))
 
     def forward(self, x):
@@ -1222,8 +1229,8 @@ class ToyNet(nn.Module):
 
 class ConvNet4(nn.Module):
 
-    def __init__(self, nonlin=nn.ReLU, use_batchnorm=False, 
-                 input_shape=(3, 32, 32), separate_activations=True):
+    def __init__(self, nonlin=nn.ReLU, use_batchnorm=False, input_shape=(3, 32, 32), 
+                 separate_activations=True, multi_gpu_modules=False):
         super().__init__()
         self.use_batchnorm = use_batchnorm
         self.conv1_size = 32
@@ -1284,20 +1291,25 @@ class ConvNet4(nn.Module):
             del block2['nonlin2']
             del block3['nonlin3']
 
+        block1 = nn.Sequential(block1)
+        block2 = nn.Sequential(block2)
+        block3 = nn.Sequential(block3)
+        block4 = nn.Sequential(block4)
+        if multi_gpu_modules:
+            block1 = nn.DataParallel(block1)
+            block2 = nn.DataParallel(block2)
+            block3 = nn.DataParallel(block3)
+            block4 = nn.DataParallel(block4)
+
         if self.separate_activations:
             self.all_modules = nn.ModuleList([
-                nn.Sequential(block1),
-                nn.Sequential(block2),
-                nn.Sequential(block3),
-                nn.Sequential(block4),
+                block1, block2, block3, block4,
             ])
             self.all_activations = nn.ModuleList([nonlin(), nonlin(), nonlin()])
         else:
             self.all_modules = nn.Sequential(OrderedDict([
-                ('block1', nn.Sequential(block1)),
-                ('block2', nn.Sequential(block2)),
-                ('block3', nn.Sequential(block3)),
-                ('block4', nn.Sequential(block4)),
+                ('block1', block1), ('block2', block2),
+                ('block3', block3), ('block4', block4),
             ]))
 
     def forward(self, x):
