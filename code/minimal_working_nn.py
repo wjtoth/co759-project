@@ -231,9 +231,9 @@ def main():
                     SearchOptimizer, batch_size=args.batch, 
                     criterion="loss", regions=10, 
                     perturb_scheduler=lambda x, y, z: 1000, 
-                    candidates=64, iterations=1, searches=1, 
+                    candidates=64, iterations=10, searches=1, 
                     search_type="beam", perturb_type="grad_guided",
-                    candidate_type="grad_sampled", candidate_grad_delay=0)
+                    candidate_type="grad", candidate_grad_delay=1)
             elif args.comb_opt_method == 'genetic':
                 target_optimizer = partial(
                     GeneticOptimizer, batch_size=args.batch, candidates=10, 
@@ -241,7 +241,7 @@ def main():
             elif args.comb_opt_method == 'rand_grad':
                 target_optimizer = partial(
                     RandomGradOptimizer, batch_size=args.batch, 
-                    candidates=64, iterations=10, searches=1)
+                    candidates=64, iterations=2, searches=1)
             else:
                 raise NotImplementedError
         else:
@@ -249,8 +249,7 @@ def main():
 
         train(network, train_loader, val_loader, criterion, optimizer, 
               args.epochs, num_classes, target_optimizer=target_optimizer, 
-              log_dir=log_dir, logger=tb_logger, use_gpu=args.cuda, 
-              args=args, print_param_info=False)
+              log_dir=log_dir, logger=tb_logger, use_gpu=args.cuda, args=args)
         print('Finished training\n')
 
     if args.adv_eval:
@@ -326,6 +325,18 @@ def accuracy_topk(prediction, target, k=5, average=True):
     return accuracy_topk
 
 
+def infer(modules, input_, activations=None):
+    if isinstance(modules, list):
+        for i, module in enumerate(reversed(list(modules))):
+            if i == 0:
+                output = module(input_)
+            else:
+                output = module(activations[i-1](output))
+    else:
+        output = modules(input_)
+    return output
+
+
 class Metrics(dict):
 
     def __getitem__(self, key):
@@ -371,8 +382,8 @@ class TargetPropOptimizer:
         """
         raise NotImplementedError
 
-    def evaluate_candidates(self, module, module_index, 
-                            loss_function, targets, candidates):
+    def evaluate_candidates(self, modules, module_index, loss_function, targets, 
+                            candidates, activations=None, criterion_weight=None):
         if torch.is_tensor(candidates):
             candidate_batch = candidates
         else:
@@ -390,20 +401,25 @@ class TargetPropOptimizer:
         candidate_batch = candidate_batch.detach()
         if self.requires_grad:
             candidate_batch.requires_grad_()
-        output = module(candidate_batch)
-        if module_index > 0:
+        output = infer(modules, candidate_batch, activations)
+        if module_index > 0 and self.criterion != "output_loss":
             output = output.view_as(target_batch)
-            if self.criterion != "loss":
+            if self.criterion.startswith("accuracy"):
                 output = self.activations[module_index](output)
             if self.criterion == "accuracy_top5":
                 raise RuntimeError("Can only use top 5 accuracy as "
                                    "optimization criteria at output layer.")
-        if self.criterion in ["loss", "loss_grad"]:
+        if "loss" in self.criterion:
             losses = loss_function(output, target_batch)
         elif self.criterion == "accuracy":
             losses = accuracy(output, target_batch, average=False)
         elif self.criterion == "accuracy_top5":
             losses = accuracy_topk(output, target_batch, average=False)
+        if criterion_weight is not None:
+            criterion_weight = criterion_weight.view(
+                criterion_weight.shape[0]*criterion_weight.shape[1],
+                *criterion_weight.shape[2:])
+            losses *= criterion_weight
         losses = losses.view(len(candidates), int(np.prod(targets.shape[1:])))
         losses = losses.mean(dim=1)  # mean everything but candidate batch dim
         if self.requires_grad:
@@ -422,9 +438,10 @@ class TargetPropOptimizer:
         else:
             return losses
 
-    def step(self, train_step, module_index, module_target, base_targets=None):
-        return self.generate_target(train_step, module_index, 
-                                    module_target, base_targets)
+    def step(self, train_step, module_index, module_target, 
+             base_targets=None, criterion_weight=None):
+        return self.generate_target(train_step, module_index, module_target, 
+                                    base_targets, criterion_weight)
 
 
 def generate_neighborhood(base_tensor, size, radius, sampling_weights=None, 
@@ -574,11 +591,19 @@ class SearchOptimizer(TargetPropOptimizer):
                     sampling_weights=sample_tensor))
         return torch.cat(candidates)
 
-    def find_candidates(self, module_index, module_target, 
-                        train_step, base_candidates=None):
+    def find_candidates(self, module_index, module_target, train_step, 
+                        base_candidates=None, criterion_weight=None):
         loss_function = self.loss_functions[module_index]
-        module = self.modules[module_index]
-        if module_index > 0:
+        if self.criterion == "output_loss":
+            modules = self.modules[:module_index+1]
+            activations = self.activations[:module_index]
+        else:
+            modules = self.modules[module_index]
+            activations = None
+        if criterion_weight is not None:
+            criterion_weight = torch.stack([criterion_weight]*(self.candidates 
+                + (len(base_candidates) if base_candidates is not None else 1))) 
+        if module_index > 0 and self.criterion != "output_loss":
             module_target = module_target.float()
             loss_function = partial(soft_hinge_loss, reduce_=False)
         target_batch = torch.stack([module_target]*(self.candidates 
@@ -609,8 +634,9 @@ class SearchOptimizer(TargetPropOptimizer):
                 if i == 0:
                     # Assumes first parent is activation
                     loss_grad = [self.evaluate_candidates(
-                        module, module_index, loss_function, 
-                        module_target.unsqueeze(0), parents[0].unsqueeze(0))[1]]
+                        modules, module_index, loss_function, 
+                        module_target.unsqueeze(0), parents[0].unsqueeze(0), 
+                        activations=activations)[1]]
                 else:
                     loss_grad = group_data[2]
                 candidate_batch = torch.cat(loss_grad, dim=0)
@@ -628,8 +654,9 @@ class SearchOptimizer(TargetPropOptimizer):
                 candidate_batch = self.generate_candidates(
                     parents, iteration_parameters, 
                     perturb_base_tensors, sampling_weights)
-            loss_data = self.evaluate_candidates(module, module_index, loss_function, 
-                                                 target_batch, candidate_batch)
+            loss_data = self.evaluate_candidates(
+                modules, module_index, loss_function, target_batch, 
+                candidate_batch, activations, criterion_weight)
             group_data = multi_split(
                 (candidate_batch,) + (loss_data 
                     if isinstance(loss_data, tuple) else (loss_data,)), 
@@ -646,12 +673,12 @@ class SearchOptimizer(TargetPropOptimizer):
         for candidate, loss in best_candidates:
             self.state["candidates"].append((candidate.long(), loss))
 
-    def generate_target(self, train_step, module_index, 
-                        module_target, base_targets=None):
+    def generate_target(self, train_step, module_index, module_target, 
+                        base_targets=None, criterion_weight=None):
         self.state["candidates"] = []
         for i in range(self.searches):
-            self.find_candidates(module_index, module_target, 
-                                 train_step, base_targets)
+            self.find_candidates(module_index, module_target, train_step, 
+                                 base_targets, criterion_weight)
         if self.criterion == "loss":
             index, loss = min(
                 enumerate([loss for candidate, loss in self.state["candidates"]]),
@@ -714,7 +741,7 @@ class RandomGradOptimizer(TargetPropOptimizer):
         target_batch = torch.stack([module_target]*self.candidates)
 
         parents = [get_random_tensor(self.shapes[module_index], use_gpu=self.use_gpu)
-                   for i in range(self.candidates)]
+                   for i in range(self.candidates)] 
         candidate_batch = torch.stack(parents, dim=0)
         for i in range(self.iterations):
             loss_grad = self.evaluate_candidates(
@@ -728,8 +755,8 @@ class RandomGradOptimizer(TargetPropOptimizer):
         candidate = torch.sign(torch.mean(candidate_batch, 0))
         self.state["candidates"].append(candidate.long())
 
-    def generate_target(self, train_step, module_index, 
-                        module_target, base_targets=None):
+    def generate_target(self, train_step, module_index, module_target, 
+                        base_targets=None, criterion_weight=None):
         self.state["candidates"] = []
         for i in range(self.searches):
             self.find_candidates(module_index, module_target, 
@@ -752,7 +779,7 @@ def print_param_info(module, layer):
 
 def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
           optimizer, epochs, num_classes, target_optimizer=None, 
-          log_dir=None, logger=None, use_gpu=True, args=None, print_param_info=False):
+          log_dir=None, logger=None, use_gpu=True, args=None):
     model.train()
     batch_size = train_dataset_loader.batch_size
     train_per_layer = target_optimizer is not None
@@ -769,6 +796,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             loss_functions=[loss_function]*len(model.all_modules),
             use_gpu=use_gpu)
     else:
+        modules = None
         optimizer = optimizer(model.parameters())
         lr_schedulers = [optim.lr_scheduler.MultiStepLR(
             optimizer, args.lr_decay_epochs, gamma=args.lr_decay_factor)]
@@ -781,7 +809,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     [batch_size] + model.input_sizes[i+1], num_classes)
     print("Optimizers created.")
     extra_args = target_optimizer.__dict__.copy() if args.comb_opt else None
-    if "perturb_base_tensor" in extra_args.keys():
+    if extra_args is not None and "perturb_base_tensors" in extra_args:
         del extra_args["perturb_base_tensors"]
     store_run_info(args, log_dir, extra_args=extra_args)
     training_metrics = Metrics({'dataset_batches': len(train_dataset_loader),
@@ -813,80 +841,128 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                         inputs = inputs.view(batch_size, 15)
                     except RuntimeError:
                         inputs = inputs.view(batch_size, 3072)
-            train_step = epoch*len(train_dataset_loader) + i
+            step = epoch*len(train_dataset_loader) + i
             if i % 10 == 1:
                 last_time = eval_step(model, inputs, labels, loss_function, 
                                       training_metrics, logger, epoch, 
-                                      i, train_step, last_time)
-            targets = labels
-            if train_per_layer:
-                # Obtain activations / hidden states
-                preactivations = []
-                postactivations = []
-                for j, (module, _) in enumerate(modules[::-1]):
-                    if j == 0:
-                        outputs = module(inputs)
-                    else:
-                        outputs = module(activation)
-                    preactivations.append(outputs)
-                    if j != len(modules)-1:
-                        activation = model.all_activations[j](outputs).detach()
-                        activation.requires_grad_()
-                        postactivations.append(activation)
-                preactivations.reverse()
-                postactivations.reverse()
-                # Then target prop in reverse mode
-                loss_grad = 1
-                for j, (module, optimizer) in enumerate(modules):
-                    optimizer.zero_grad()
-                    outputs = preactivations[j]
-                    if j == 0:
-                        loss = loss_function(outputs, targets.detach()).mean()
-                    else:
-                        loss = soft_hinge_loss(
-                            outputs, targets.detach().float(), reduce_=False)
-                        loss *= torch.abs(loss_grad)
-                        loss = loss.mean()
-                    loss.backward()
-                    if j != len(modules)-1:
-                        loss_grad = postactivations[j].grad
-                    optimizer.step()
-                    if j != len(modules)-1:
-                        activation = model.all_activations[len(modules)-1-j-1](
-                            preactivations[j+1].detach())
-                        if args.model == "convnet4":
-                            perturb_sizes = [7000, 15000, 30000]
-                        elif args.model == "toynet":
-                            perturb_sizes = [500]
-                        perturb_scheduler = lambda x, y, z: perturb_sizes[-y-1]
-                        targets, target_loss = target_optimizer.step(
-                            train_step, j, targets, 
-                            base_targets=[[activation, 1/1, perturb_scheduler]])
-                    if print_param_info and i % 100 == 1:
-                        print_param_metrics(module, len(modules)-1-j)
-            if (train_step in [0, 10, 100, 1000, 10000, 50000] 
-                    and args.model == "toynet" and args.collect_params):
-                target_loss = loss_function(modules[0][0](targets.float()), labels)
-                store_step_data(model, labels[10], target_loss[10].item(), 
-                                train_step, os.path.join(log_dir, "run_data"))
-            if not train_per_layer:
-                if args.target_momentum:
-                    for activation in activations:
-                        activation.batch_labels = targets
-                optimizer.zero_grad()
-                outputs = model(inputs)
-                loss = loss_function(outputs, targets)
-                loss.backward(retain_graph=model.needs_backward_twice)
-                if model.needs_backward_twice:
-                    optimizer.zero_grad()
-                    loss.backward()
-                optimizer.step()
+                                      i, step, last_time)
+            train_step(model, modules, inputs, labels, loss_function, optimizer, 
+                       target_optimizer, args, step, train_per_layer, log_dir)
         with torch.no_grad():
             evaluate(model, eval_dataset_loader, loss_function, 
-                     eval_metrics, logger, train_step, log=True, use_gpu=use_gpu)
+                     eval_metrics, logger, step, log=True, use_gpu=use_gpu)
         if args.store_checkpoints:
             store_checkpoint(model, optimizer, args, training_metrics, 
                              eval_metrics, epoch, log_dir)
+
+
+def train_step(model, modules, inputs, targets, loss_function, optimizer, 
+               target_optimizer, args, step, train_per_layer, log_dir):
+    output_targets = targets
+    if train_per_layer:
+        # Obtain activations / hidden states
+        preactivations = []
+        postactivations = []
+        for j, (module, _) in enumerate(modules[::-1]):
+            if j == 0:
+                outputs = module(inputs)
+            else:
+                outputs = module(activation)
+            preactivations.append(outputs)
+            if j != len(modules)-1:
+                activation = model.all_activations[j](outputs).detach()
+                activation.requires_grad_()
+                postactivations.append(activation)
+        preactivations.reverse()
+        postactivations.reverse()
+        # Then target prop in reverse mode
+        loss_grad = 1
+        for j, (module, optimizer) in enumerate(modules):
+            optimizer.zero_grad()
+            outputs = preactivations[j]
+            if j == 0:
+                loss = loss_function(outputs, targets.detach()).mean()
+            else:
+                loss = soft_hinge_loss(
+                    outputs, targets.detach().float(), reduce_=False)
+                loss *= torch.abs(loss_grad)
+                loss = loss.sum()
+            if j != len(modules)-1:
+                activation = model.all_activations[len(modules)-1-j-1](
+                    preactivations[j+1].detach())
+                if args.model == "convnet4":
+                    perturb_sizes = [7000, 15000, 30000]
+                elif args.model == "toynet":
+                    perturb_sizes = [1000]
+                perturb_scheduler = lambda x, y, z: perturb_sizes[-y-1]
+                targets, target_loss = target_optimizer.step(
+                    step, j, targets, 
+                    base_targets=[[None, 1/1, perturb_scheduler]], 
+                    criterion_weight=None if j == 0 else torch.abs(loss_grad))
+            optimizer.zero_grad()
+            loss.backward()
+            if j != len(modules)-1:
+                loss_grad = postactivations[j].grad
+            optimizer.step()
+            
+    if (step in [0, 10, 100, 1000, 10000, 50000] 
+            and args.model == "toynet" and args.collect_params):
+        target_loss = loss_function(modules[0][0](targets.float()), output_targets)
+        store_step_data(model, output_targets[10], target_loss[10].item(), 
+                        step, os.path.join(log_dir, "run_data"))
+    if not train_per_layer:
+        if args.target_momentum:
+            for activation in activations:
+                activation.batch_labels = targets
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = loss_function(outputs, targets)
+        loss.backward(retain_graph=model.needs_backward_twice)
+        if model.needs_backward_twice:
+            optimizer.zero_grad()
+            loss.backward()
+        optimizer.step()
+
+
+def train_step_test(model, modules, inputs, targets, loss_function, optimizer, 
+                    target_optimizer, args, step, train_per_layer, log_dir):
+    if train_per_layer:
+        # Obtain activations / hidden states
+        preactivations = []
+        postactivations = []
+        for j, (module, _) in enumerate(modules[::-1]):
+            if j == 0:
+                outputs = module(inputs)
+            else:
+                outputs = module(activation)
+            preactivations.append(outputs)
+            if j != len(modules)-1:
+                activation = model.all_activations[j](outputs).detach()
+                activation.requires_grad_()
+                postactivations.append(activation)
+        preactivations.reverse()
+        postactivations.reverse()
+        # Then target prop in reverse mode
+        loss_grad = 1
+        for j, (module, optimizer) in enumerate(modules):
+            optimizer.zero_grad()
+            outputs = preactivations[j]
+            if j == 0:
+                loss = loss_function(outputs, targets.detach()).mean()
+            else:
+                #loss = torch.tanh(outputs) * loss_grad
+                loss = soft_hinge_loss(
+                    outputs, targets.detach().float(), reduce_=False)
+                loss *= torch.abs(loss_grad)
+                loss = loss.sum()
+            optimizer.zero_grad()
+            loss.backward()
+            if j != len(modules)-1:
+                loss_grad = postactivations[j].grad
+                targets = -torch.sign(loss_grad)
+            optimizer.step()
+    else:
+        raise RuntimeError("Change the training step function!")
 
 
 def eval_step(model, inputs, labels, loss_function, training_metrics, 
@@ -1040,7 +1116,7 @@ def load_checkpoint(log_dir, epoch=None):
     return checkpoint_state
 
 
-def correct_format(row_string):
+def correct_format(row_string, index=None):
     # Remove delimiters and correct spacing
     corrected_string = row_string.replace("[", "").replace("]", "").strip()
     corrected_string = re.sub(r",(?: |  )", " ", corrected_string)
@@ -1048,31 +1124,53 @@ def correct_format(row_string):
     values = re.split(r" +", corrected_string)
     corrected_string = " ".join([str(float(value)) for value in values])
     corrected_string = re.sub(r" (?!-)", "  ", corrected_string)
+    # Place in columns
+    values = [element for element in corrected_string.split(" ") if element.strip()]
+    corrected_string = str(index) + "\t" if index is not None else ""
+    for value in values:
+        corrected_string += value + "\t"
     return corrected_string
 
 
 def store_step_data(model, label, target_loss, train_step, log_dir, layer=2):
+    if not os.path.exists(log_dir):
+        os.mkdir(log_dir)
     torch.set_printoptions(threshold=1000000, linewidth=1000000)
     parameters = list(model.parameters())
     weight_matrix = parameters[2*(layer-1)].transpose(0, 1)
     bias_vector = parameters[2*(layer-1)+1]
     weight_rows = re.findall(r"\[.*?\]", str(weight_matrix))
     bias_rows = re.findall(r"\[.*?\]", str(bias_vector))
+    weight_rows = [correct_format(row, index=i+1) for i, row in enumerate(weight_rows)]
+    bias_rows = [correct_format(row, index=i+1) for i, row in enumerate(bias_rows)]
     weight_file_name = os.path.join(log_dir, "weight_step" + str(train_step) + ".txt")
-    with open(weight_file_name, "w+") as weight_file:
-        for row in weight_rows:
-            print(correct_format(row), file=weight_file)
-    with open(weight_file_name.replace("weight", "bias"), "w+") as bias_file:
-        for row in bias_rows: 
-            print(correct_format(row), file=bias_file)
+
     if label.numel() == 1:
         label_vector = torch.zeros(10)
         label_vector[label] = 1
         label = label_vector
     label_rows = re.findall(r"\[.*?\]", str(label))
+    label_rows = [correct_format(row, index=i+1) for i, row in enumerate(label_rows)]
+
+    weight_string = "\n".join(weight_rows)
+    bias_string = "\n".join(bias_rows)
+    label_string = "\n".join(label_rows)
+    with open(weight_file_name, "w+") as weight_file:
+        print(weight_string, file=weight_file)
+    with open(weight_file_name.replace("weight", "bias"), "w+") as bias_file:
+        print(bias_string, file=bias_file)
     with open(weight_file_name.replace("weight", "target"), "w+") as label_file:
-        for row in label_rows:
-            print(correct_format(row), file=label_file)
+        print(label_string, file=label_file)
+
+    data_string = "data;\n\nparam M:=100 ;\nparam N:=10 ;\n\n\n"
+    data_string += "param T:\n\t" + "\t".join(str(i) for i in range(1, 11)) + " :=\n"
+    data_string += label_string + " ;\n\n\n"
+    data_string += "param B:\n\t" + "\t".join(str(i) for i in range(1, 11)) + " :=\n"
+    data_string += bias_string + " ;\n\n\n"
+    data_string += "param W:\n\t\t" + "\t\t".join(str(i) for i in range(1, 11)) + " :=\n"
+    data_string += weight_string + "  ;"
+    with open(weight_file_name.replace("weight", "data"), "w+") as data_file:
+        print(data_string, file=data_file)
     with open(weight_file_name.replace("weight", "loss"), "w+") as loss_file:
         print(target_loss, file=loss_file)
     torch.set_printoptions(profile="default")
@@ -1256,7 +1354,7 @@ class StepF(Function):
                     range(self.batch_labels.shape[0]), self.batch_labels]
                 grad_input, self.target = tp_grad_func(
                     input_, go, None, self.make01, velocity=momentum_tensor.float(), 
-                    momentum_factor=self.momentum_factor, return_target=True)
+                    momentum_factor=self.momentum_factor, return_target=False)
                 self.momentum_state[range(self.batch_labels.shape[0]), 
                                     self.batch_labels] = self.target.long()
             else:
