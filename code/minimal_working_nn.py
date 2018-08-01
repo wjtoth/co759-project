@@ -113,6 +113,7 @@ def main():
     # computation arguments
     parser.add_argument('--cuda', action='store_true', default=False,
                         help='if specified, use CPU only')
+    parser.add_argument('--device', type=int, default=0, help='CUDA device ID to use')
     parser.add_argument('--multi-gpu', action='store_true', default=False,
                         help='if specified, use all available GPUs')
     parser.add_argument('--seed', type=int, default=468412397,
@@ -137,7 +138,7 @@ def main():
             6, batch_size=args.batch, num_workers=args.nworkers)
         num_classes = 2
     else:
-        train_loader, val_loader, _, num_classes = \
+        train_loader, val_loader, test_loader, num_classes = \
             create_datasets(args.dataset, args.batch, args.test_batch, not args.no_aug, 
                             args.no_val, args.data_root, args.cuda, args.seed, 
                             args.nworkers, args.dbg_ds_size, args.download)
@@ -201,7 +202,8 @@ def main():
         network.needs_backward_twice = tp.needs_backward_twice(args.grad_tp_rule)
     if args.cuda:
         print("Moving to GPU...")
-        network = network.cuda()
+        with torch.cuda.device(args.device):
+            network = network.cuda()
     if args.multi_gpu and not args.comb_opt:
         network = nn.DataParallel(network)
 
@@ -249,25 +251,28 @@ def main():
         else:
             target_optimizer = None
 
-        train(network, train_loader, val_loader, criterion, optimizer, 
-              args.epochs, num_classes, target_optimizer=target_optimizer, 
-              log_dir=log_dir, logger=tb_logger, use_gpu=args.cuda, args=args)
+        with torch.cuda.device(args.device):
+            train(network, train_loader, val_loader, criterion, optimizer, 
+                  args.epochs, num_classes, target_optimizer=target_optimizer, 
+                  log_dir=log_dir, logger=tb_logger, use_gpu=args.cuda, args=args)
         print('Finished training\n')
 
     if args.adv_eval:
         print('Evaluating on adversarial examples...')
         if args.adv_attack == 'all':
             for attack in adversarial.ATTACKS:
-                failure_rate = evaluate_adversarially(
-                    network, adversarial_eval_dataset, 'untargeted_misclassify', 
-                    attack, args.test_batch, num_classes, 
-                    args.adv_epsilon, args.cuda)
+                with torch.cuda.device(args.device):
+                    failure_rate = evaluate_adversarially(
+                        network, adversarial_eval_dataset, 'untargeted_misclassify', 
+                        attack, args.test_batch, num_classes, 
+                        args.adv_epsilon, args.cuda)
                 print('Failure rate: %0.2f%%' % (100*failure_rate))
         else:
-            failure_rate = evaluate_adversarially(
-                network, adversarial_eval_dataset, 'untargeted_misclassify', 
-                args.adv_attack, args.test_batch, num_classes, 
-                args.adv_epsilon, args.cuda)
+            with torch.cuda.device(args.device):
+                failure_rate = evaluate_adversarially(
+                    network, adversarial_eval_dataset, 'untargeted_misclassify', 
+                    args.adv_attack, args.test_batch, num_classes, 
+                    args.adv_epsilon, args.cuda)
             print('Failure rate: %0.2f%%' % (100*failure_rate))
 
 
@@ -647,7 +652,7 @@ class SearchOptimizer(TargetPropOptimizer):
                     candidate_batch = sample_sign(
                         candidate_batch, parents[0].unsqueeze(0))
                 else:
-                    candidate_batch = -torch.sign(candidate_batch)
+                    candidate_batch = -candidate_batch
                 parents = ([torch.sign(torch.mean(candidate_batch, 0))] 
                            + (parents[1:] if i == 0 else []))
                 best_candidates = [(parent, None) for parent in parents]
