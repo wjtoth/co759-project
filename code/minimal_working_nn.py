@@ -32,6 +32,8 @@ from util.tensorboardlogger import TensorBoardLogger
 # ours
 import adversarial
 from graph_nn import get_graphs
+from dropbox_tools import upload
+
 
 def main():
     # argument definitions
@@ -125,6 +127,9 @@ def main():
     parser.add_argument('--store-checkpoints', action='store_true', default=False, 
                         help='if specified, enables storage of the current model ' 
                              'and training parameters at each epoch')
+    parser.add_argument('--logs_to_dbx', action='store_true', default=False,
+                        help='if specified, uploads all local log files to dropbox')
+    parser.add_argument('--dbx_token', type=str)
     
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
@@ -252,10 +257,14 @@ def main():
             target_optimizer = None
 
         with torch.cuda.device(args.device):
-            train(network, train_loader, val_loader, criterion, optimizer, 
-                  args.epochs, num_classes, target_optimizer=target_optimizer, 
-                  log_dir=log_dir, logger=tb_logger, use_gpu=args.cuda, args=args)
-        print('Finished training\n')
+            try:
+                train(network, train_loader, val_loader, criterion, optimizer, 
+                      args.epochs, num_classes, target_optimizer=target_optimizer, 
+                      log_dir=log_dir, logger=tb_logger, use_gpu=args.cuda, args=args)
+            except KeyboardInterrupt:
+                print("\nTraining interrupted!\n")
+            else:
+                print("\nFinished training.\n")
 
     if args.adv_eval:
         print('Evaluating on adversarial examples...')
@@ -274,6 +283,9 @@ def main():
                     args.adv_attack, args.test_batch, num_classes, 
                     args.adv_epsilon, args.cuda)
             print('Failure rate: %0.2f%%' % (100*failure_rate))
+
+    if args.logs_to_dbx:
+        upload(log_dir, token=args.dbx_token)
 
 
 def convert_to_1hot(target, noutputs, make_11=True):
