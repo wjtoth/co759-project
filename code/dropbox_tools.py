@@ -30,4 +30,5 @@ def upload(path, dbx_path=None, token=None, dbx=None, overwrite=False):
     else:
         for dir_path, dir_names, file_names in os.walk(path):
             for file_name in file_names:
-                upload(os.path.join(dir_path, file_name), dbx_path)
+                upload(os.path.join(dir_path, file_name), dbx_path=dbx_path, 
+                       token=token, dbx=dbx, overwrite=overwrite)
