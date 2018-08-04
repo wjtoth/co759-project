@@ -83,6 +83,21 @@ def main():
                         help='factor by which to multiply the momentum tensor '
                              'during target setting')
 
+    # combinatorial search arguments
+    parser.add_argument('--criterion', type=str, default='loss', 
+                        choices=('loss', 'output_loss', 'loss_grad', 
+                                 'accuracy', 'accuracy_top5'))
+    parser.add_argument('--candidates', type=int, default=64)
+    parser.add_argument('--iterations', type=int, default=10)
+    parser.add_argument('--searches', type=int, default=1)
+    parser.add_argument('--search_type', type=str, default='beam', 
+                        choices=('beam', 'parallel'))
+    parser.add_argument('--perturb_type', type=str, default='random',
+                        choices=('random', 'grad_guided'))
+    parser.add_argument('--candidate_type', type=str, default='random',
+                        choices=('random', 'grad', 'grad_sampled'))
+    parser.add_argument('--candidate_grad_delay', type=int, default=1)
+
     # data arguments
     parser.add_argument('--dataset', type=str, default='cifar10',
                         choices=('mnist', 'cifar10', 'cifar100', 
@@ -238,19 +253,20 @@ def main():
             if args.comb_opt_method == 'local_search':
                 target_optimizer = partial( 
                     SearchOptimizer, batch_size=args.batch, 
-                    criterion="loss", regions=10, 
+                    criterion=args.criterion, regions=10, 
                     perturb_scheduler=lambda x, y, z: 1000, 
-                    candidates=64, iterations=10, searches=1, 
-                    search_type="beam", perturb_type="grad_guided",
-                    candidate_type="grad", candidate_grad_delay=1)
+                    candidates=args.candidates, iterations=args.iterations, 
+                    searches=args.searches, search_type=args.search_type, 
+                    perturb_type=args.perturb_type, candidate_type=args.candidate_type, 
+                    candidate_grad_delay=args.candidate_grad_delay)
             elif args.comb_opt_method == 'genetic':
-                target_optimizer = partial(
-                    GeneticOptimizer, batch_size=args.batch, candidates=10, 
-                    parents=5, generations=10, populations=1)
+                raise NotImplementedError(
+                    "Pure genetic algorithm not currently implemented.")
             elif args.comb_opt_method == 'rand_grad':
                 target_optimizer = partial(
                     RandomGradOptimizer, batch_size=args.batch, 
-                    candidates=64, iterations=2, searches=1)
+                    candidates=args.candidates, iterations=args.iterations, 
+                    searches=args.searches)
             else:
                 raise NotImplementedError
         else:
