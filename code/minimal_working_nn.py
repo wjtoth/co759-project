@@ -436,6 +436,7 @@ class TargetPropOptimizer:
         candidate_batch = candidate_batch.detach()
         if self.requires_grad:
             candidate_batch.requires_grad_()
+        print(candidate_batch.device)
         output = infer(modules, candidate_batch, activations)
         if module_index > 0 and self.criterion != "output_loss":
             output = output.view_as(target_batch)
@@ -872,6 +873,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 continue
             if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
+                print(inputs.device, labels.device)
             if isinstance(model, ToyNet):
                 try:
                     inputs = inputs.view(batch_size, 784)
