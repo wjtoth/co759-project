@@ -436,7 +436,6 @@ class TargetPropOptimizer:
         candidate_batch = candidate_batch.detach()
         if self.requires_grad:
             candidate_batch.requires_grad_()
-        print(candidate_batch.device)
         output = infer(modules, candidate_batch, activations)
         if module_index > 0 and self.criterion != "output_loss":
             output = output.view_as(target_batch)
@@ -508,7 +507,6 @@ def generate_neighborhood(base_tensor, size, radius, sampling_weights=None,
     else:
         one_tensor = perturb_base_tensor
     indices = torch.bernoulli(one_tensor*sampling_prob)
-    print(batch_base.device, indices.device)
     if sampling_weights is not None:
         batch_weights = torch.stack([sampling_weights]*size)
         sampling_mask = indices.float() * batch_weights
@@ -520,8 +518,7 @@ def generate_neighborhood(base_tensor, size, radius, sampling_weights=None,
 def get_random_tensor(shape, make01=False, use_gpu=True):
     candidate = torch.randint(0, 2, shape)
     if use_gpu:
-        candidate.cuda()
-    print(use_gpu, candidate.device)
+        candidate = candidate.cuda()
     if not make01:
         candidate.mul_(2)
         candidate.add_(-1)
