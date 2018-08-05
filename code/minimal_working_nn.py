@@ -498,11 +498,12 @@ def generate_neighborhood(base_tensor, size, radius, sampling_weights=None,
     Returns:
         A total of 'size' randomly-generated neighbors of base_tensor. 
     """
-    device = torch.device("cuda:0") if use_gpu else torch.device("cpu")
     batch_base = torch.stack([base_tensor]*size)
     sampling_prob = radius / base_tensor.numel()
     if perturb_base_tensor is None:
-        one_tensor = torch.ones(batch_base.shape, device=device)
+        one_tensor = torch.ones(batch_base.shape)
+        if use_gpu:
+            one_tensor = one_tensor.cuda()
     else:
         one_tensor = perturb_base_tensor
     indices = torch.bernoulli(one_tensor*sampling_prob)
@@ -515,8 +516,9 @@ def generate_neighborhood(base_tensor, size, radius, sampling_weights=None,
 
 
 def get_random_tensor(shape, make01=False, use_gpu=True):
-    device = torch.device("cuda:0") if use_gpu else torch.device("cpu")
-    candidate = torch.randint(0, 2, shape, device=device)
+    candidate = torch.randint(0, 2, shape)
+    if use_gpu:
+        candidate.cuda()
     if not make01:
         candidate.mul_(2)
         candidate.add_(-1)
@@ -606,8 +608,9 @@ class SearchOptimizer(TargetPropOptimizer):
         self.state = {"chosen_groups": []}
         # To save a little time, create perturbation tensors beforehand:
         self.perturb_base_tensors = [
-            torch.ones([self.candidates] + shape, device=torch.device("cuda:0"))
-            for shape in self.shapes]
+            torch.ones([self.candidates] + shape).cuda() if self.use_gpu
+            else torch.ones([self.candidates] + shape) for shape in self.shapes]
+
 
     def generate_candidates(self, parent_candidates, parameters, 
                             base_perturb_tensors=None, sampling_weights=None):
@@ -652,9 +655,10 @@ class SearchOptimizer(TargetPropOptimizer):
                    for candidate, _, _ in base_candidates]
         beam_size = len(parents) if self.search_type == "beam" else 1
         if len(parents) > 1:
-            perturb_base_tensors = [torch.ones([count] + self.shapes[module_index], 
-                                               device=torch.device("cuda:0"))
-                                    for count, _ in search_parameters]
+            perturb_base_tensors = [
+            torch.ones([count] + self.shapes[module_index]).cuda() if self.use_gpu
+            else torch.ones([count] + self.shapes[module_index])
+            for count, _ in search_parameters]
         else:
             perturb_base_tensors = [self.perturb_base_tensors[module_index]]
 
