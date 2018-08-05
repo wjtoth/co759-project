@@ -508,10 +508,12 @@ def generate_neighborhood(base_tensor, size, radius, sampling_weights=None,
     else:
         one_tensor = perturb_base_tensor
     indices = torch.bernoulli(one_tensor*sampling_prob)
+    print(batch_base.device, indices.device)
     if sampling_weights is not None:
         batch_weights = torch.stack([sampling_weights]*size)
         sampling_mask = indices.float() * batch_weights
         indices = torch.bernoulli(sampling_mask)  
+    print(batch_base.device, indices.device)
     neighbourhood = batch_base * (indices*-2 + 1)
     return neighbourhood
 
@@ -572,11 +574,6 @@ def splice(tensor, region_indices):
     return spliced
 
 
-def normalized_diff_old(x, y):
-    sign_match = torch.eq(x.sign(), y.sign()).float()
-    return sign_match * (torch.abs(x + y) / (2*torch.max(torch.abs(x), torch.abs(y))))    
-
-
 def normalized_diff(x, y, offset=3/5):
     sign_match = torch.eq(x.sign(), y.sign()).float()
     shifted_norm = torch.abs(x) + offset
@@ -627,7 +624,8 @@ class SearchOptimizer(TargetPropOptimizer):
                 candidates.append(generate_neighborhood(
                     candidate, count, perturb_size, 
                     perturb_base_tensor=perturb_tensor, 
-                    sampling_weights=sample_tensor))
+                    sampling_weights=sample_tensor,
+                    use_gpu=self.use_gpu))
         return torch.cat(candidates)
 
     def find_candidates(self, module_index, module_target, train_step, 
@@ -657,9 +655,9 @@ class SearchOptimizer(TargetPropOptimizer):
         beam_size = len(parents) if self.search_type == "beam" else 1
         if len(parents) > 1:
             perturb_base_tensors = [
-            torch.ones([count] + self.shapes[module_index]).cuda() if self.use_gpu
-            else torch.ones([count] + self.shapes[module_index])
-            for count, _ in search_parameters]
+                torch.ones([count] + self.shapes[module_index]).cuda() if self.use_gpu
+                else torch.ones([count] + self.shapes[module_index])
+                for count, _ in search_parameters]
         else:
             perturb_base_tensors = [self.perturb_base_tensors[module_index]]
 
