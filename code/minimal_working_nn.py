@@ -513,7 +513,6 @@ def generate_neighborhood(base_tensor, size, radius, sampling_weights=None,
         batch_weights = torch.stack([sampling_weights]*size)
         sampling_mask = indices.float() * batch_weights
         indices = torch.bernoulli(sampling_mask)  
-    print(batch_base.device, indices.device)
     neighbourhood = batch_base * (indices*-2 + 1)
     return neighbourhood
 
@@ -522,6 +521,7 @@ def get_random_tensor(shape, make01=False, use_gpu=True):
     candidate = torch.randint(0, 2, shape)
     if use_gpu:
         candidate.cuda()
+    print(use_gpu, candidate.device)
     if not make01:
         candidate.mul_(2)
         candidate.add_(-1)
