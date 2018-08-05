@@ -868,7 +868,6 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 continue
             if use_gpu:
                 inputs, labels = inputs.cuda(), labels.cuda()
-                print(inputs.device, labels.device)
             if isinstance(model, ToyNet):
                 try:
                     inputs = inputs.view(batch_size, 784)
