@@ -35,7 +35,7 @@ def convert_to_boolean(element):
 
 
 def get_graphs(size, file_suffix="", batch_size=64, num_workers=0):
-    with open("graphs" + str(size) + file_suffix + ".txt") as graph_file:
+    with open("data/graphs/graphs" + str(size) + file_suffix + ".txt") as graph_file:
         graph_lines = graph_file.read().splitlines()
     num_edges = size * (size-1) // 2
     graphs = [(line.split(" ")[:num_edges], line.split(" ")[num_edges]) 
