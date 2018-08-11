@@ -74,21 +74,24 @@ def main():
     parser.add_argument("--target-momentum-factor", type=float, default=0.0,
                         help="factor by which to multiply the momentum tensor "
                              "during target setting")
+    parser.add_argument("--no-loss-grad-weight", action="store_true", default=False)
 
     # combinatorial search arguments
     parser.add_argument("--criterion", type=str, default="loss", 
                         choices=("loss", "output_loss", "loss_grad", 
                                  "accuracy", "accuracy_top5"))
+    parser.add_argument("--no-criterion-grad-weight", action="store_true", default=False)
     parser.add_argument("--candidates", type=int, default=64)
     parser.add_argument("--iterations", type=int, default=10)
     parser.add_argument("--searches", type=int, default=1)
-    parser.add_argument("--search_type", type=str, default="beam", 
+    parser.add_argument("--search-type", type=str, default="beam", 
                         choices=("beam", "parallel"))
-    parser.add_argument("--perturb_type", type=str, default="random",
+    parser.add_argument("--perturb-type", type=str, default="random",
                         choices=("random", "grad_guided"))
-    parser.add_argument("--candidate_type", type=str, default="random",
+    parser.add_argument("--perturb-sizes", type=int, default=None, nargs="+")
+    parser.add_argument("--candidate-type", type=str, default="random",
                         choices=("random", "grad", "grad_sampled"))
-    parser.add_argument("--candidate_grad_delay", type=int, default=1)
+    parser.add_argument("--candidate-grad-delay", type=int, default=1)
 
     # data arguments
     parser.add_argument("--dataset", type=str, default="cifar10",
@@ -134,9 +137,9 @@ def main():
     parser.add_argument("--store-checkpoints", action="store_true", default=False, 
                         help="if specified, enables storage of the current model " 
                              "and training parameters at each epoch")
-    parser.add_argument("--logs_to_dbx", action="store_true", default=False,
+    parser.add_argument("--logs-to-dbx", action="store_true", default=False,
                         help="if specified, uploads all local log files to dropbox")
-    parser.add_argument("--dbx_token", type=str)
+    parser.add_argument("--dbx-token", type=str)
     
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
@@ -163,15 +166,17 @@ def main():
     elif args.nonlin == "step01":
         nonlin = partial(Step, make01=True, targetprop_rule=args.grad_tp_rule, 
                          use_momentum=args.target_momentum, 
-                         momentum_factor=args.target_momentum_factor)
+                         momentum_factor=args.target_momentum_factor,
+                         scale_by_grad_out=not args.no_loss_grad_weight)
     elif args.nonlin == "step11":
         nonlin = partial(Step, make01=False, targetprop_rule=args.grad_tp_rule,
                          use_momentum=args.target_momentum, 
                          momentum_factor=args.target_momentum_factor, 
-                         scale_by_grad_out=True)
+                         scale_by_grad_out=not args.no_loss_grad_weight)
     elif args.nonlin == "staircase":
         nonlin = partial(activations.Staircase, targetprop_rule=args.grad_tp_rule,
-                         nsteps=5, margin=1, trunc_thresh=2)
+                         nsteps=5, margin=1, trunc_thresh=2,
+                         scale_by_grad_out=not args.no_loss_grad_weight)
 
     if args.dataset == "mnist":
         input_shape = (1, 28, 28)
@@ -459,20 +464,22 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
             else:
                 loss = soft_hinge_loss(
                     outputs, targets.detach().float(), reduce_=False)
-                loss *= torch.abs(loss_grad)
+                if not args.no_loss_grad_weight:
+                    loss *= torch.abs(loss_grad)
                 loss = loss.sum()
             if j != len(modules)-1:
                 activation = model.all_activations[len(modules)-1-j-1](
                     preactivations[j+1].detach())
                 if args.model == "convnet4":
-                    perturb_sizes = [7000, 15000, 30000]
+                    perturb_sizes = args.perturb_sizes or [7000, 15000, 30000]
                 elif args.model == "toynet":
-                    perturb_sizes = [1000]
+                    perturb_sizes = args.perturb_sizes or [1000]
                 perturb_scheduler = lambda x, y, z: perturb_sizes[-y-1]
                 targets, target_loss = target_optimizer.step(
                     step, j, targets, 
                     base_targets=[[None, 1/1, perturb_scheduler]], 
-                    criterion_weight=None if j == 0 else torch.abs(loss_grad))
+                    criterion_weight=(None if j == 0 or args.no_criterion_grad_weight 
+                                      else torch.abs(loss_grad)))
             optimizer.zero_grad()
             loss.backward()
             if j != len(modules)-1:
@@ -498,7 +505,7 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
         optimizer.step()
 
 
-def train_step_test(model, modules, inputs, targets, loss_function, optimizer, 
+def train_step_grad(model, modules, inputs, targets, loss_function, optimizer, 
                     target_optimizer, args, step, train_per_layer, log_dir):
     if train_per_layer:
         # Obtain activations / hidden states
