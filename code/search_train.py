@@ -5,6 +5,7 @@ import argparse
 from functools import partial
 from itertools import chain
 from time import time
+from multiprocessing import Process
 
 # pytorch
 import torch
@@ -27,7 +28,7 @@ from search_optimize import (soft_hinge_loss, accuracy, accuracy_topk,
 from search_models import ToyNet, ConvNet4, ConvNet8, Step
 
 
-def main():
+def get_args():
     # argument definitions
     parser = argparse.ArgumentParser()
 
@@ -123,6 +124,7 @@ def main():
     parser.add_argument("--adv-epsilon", type=float, default=0.25)
 
     # computation arguments
+    parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--cuda", action="store_true", default=False,
                         help="if specified, use CPU only")
     parser.add_argument("--device", type=int, default=0, help="CUDA device ID to use")
@@ -140,14 +142,20 @@ def main():
     parser.add_argument("--logs-to-dbx", action="store_true", default=False,
                         help="if specified, uploads all local log files to dropbox")
     parser.add_argument("--dbx-token", type=str)
-    
+
     args = parser.parse_args()
     args.cuda = args.cuda and torch.cuda.is_available()
-    args.grad_tp_rule = tp.TPRule[args.grad_tp_rule]
     args.lr_decay_epochs = [] if args.lr_decay_epochs is None else args.lr_decay_epochs
     if not args.no_aug:
         args.no_aug = True if args.dataset == "mnist" else False
+    args.grad_tp_rule = tp.TPRule[args.grad_tp_rule]
+    args.perturb_sizes = (args.perturb_sizes if isinstance(args.perturb_sizes, list) 
+                          else [args.perturb_sizes])
     
+    return args
+
+
+def main(args):
     if args.dataset == "graphs":
         train_loader, val_loader = get_graphs(
             6, batch_size=args.batch, num_workers=args.nworkers)
@@ -251,7 +259,7 @@ def main():
                 target_optimizer = partial( 
                     SearchOptimizer, batch_size=args.batch, 
                     criterion=args.criterion, regions=10, 
-                    perturb_scheduler=lambda x, y, z: 1000, 
+                    perturb_scheduler=partial(perturb_scheduler, [1000]), 
                     candidates=args.candidates, iterations=args.iterations, 
                     searches=args.searches, search_type=args.search_type, 
                     perturb_type=args.perturb_type, candidate_type=args.candidate_type, 
@@ -431,8 +439,12 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             evaluate(model, eval_dataset_loader, loss_function, 
                      eval_metrics, logger, step, log=True, use_gpu=use_gpu)
         if args.store_checkpoints:
-            store_checkpoint(model, optimizer, args, training_metrics, 
-                             eval_metrics, epoch, log_dir)
+            store_checkpoint(model, optimizers if train_per_layer else optimizer, 
+                             args, training_metrics, eval_metrics, epoch, log_dir)
+
+
+def perturb_scheduler(train_step, module_index, iteration, perturb_sizes=[1000]):
+    return perturb_sizes[-module_index-1]
 
 
 def train_step(model, modules, inputs, targets, loss_function, optimizer, 
@@ -474,10 +486,11 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                     perturb_sizes = args.perturb_sizes or [7000, 15000, 30000]
                 elif args.model == "toynet":
                     perturb_sizes = args.perturb_sizes or [1000]
-                perturb_scheduler = lambda x, y, z: perturb_sizes[-y-1]
+                perturb_schedule = partial(
+                    perturb_scheduler, perturb_sizes=perturb_sizes)
                 targets, target_loss = target_optimizer.step(
                     step, j, targets, 
-                    base_targets=[[None, 1/1, perturb_scheduler]], 
+                    base_targets=[[None, 1/1, perturb_schedule]], 
                     criterion_weight=(None if j == 0 or args.no_criterion_grad_weight 
                                       else torch.abs(loss_grad)))
             optimizer.zero_grad()
@@ -656,14 +669,16 @@ def store_run_info(terminal_args, log_dir, extra_args=None):
         print(hparams, file=info_file)
 
 
-def store_checkpoint(model, optimizer, terminal_args, training_metrics, 
+def store_checkpoint(model, optimizers, terminal_args, training_metrics, 
                      eval_metrics, epoch, log_dir):
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
+    optimizer_states = ([optimizer.state_dict() for optimizer in optimizers]
+                        if isinstance(optimizers, list) else optimizer.state_dict())
     checkpoint_state = {
         "args": terminal_args,
         "model_state": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
+        "optimizers": optimizer_states,
         "training_metrics": training_metrics,
         "eval_metrics": eval_metrics,
         "epoch": epoch,
@@ -758,4 +773,10 @@ def store_step_data(model, label, target_loss, train_step, log_dir, layer=2):
 
 
 if __name__ == "__main__":
-    main()
+    args = get_args()
+    for i in range(args.runs):
+        print("\nStarting training run " + str(i+1) + "...\n")
+        # Run in separate process to avoid PyTorch multiprocessing errors
+        process = Process(target=main, args=(args,))
+        process.start()
+        process.join()

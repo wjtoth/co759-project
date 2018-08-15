@@ -229,6 +229,14 @@ def splice(tensor, region_indices):
     return spliced
 
 
+def inverse_receptive_fields(input, output, field_count, layer, model_info):
+    # Assumes first batch dimension and splits along third and fourth dimensions
+    conv_kernel = model_info[layer]["conv"]["kernel_size"]
+    padding = model_info[layer]["conv"]["padding"]
+    pool_kernel = model_info[layer]["max_pool"]["kernel_size"]
+    pass
+
+
 def normalized_diff(x, y, offset=3/5):
     sign_match = torch.eq(x.sign(), y.sign()).float()
     shifted_norm = torch.abs(x) + offset
