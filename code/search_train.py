@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import torch.optim as optim
+import torch.multiprocessing as multiprocessing
 from torch.multiprocessing import Process
 
 # Friesen and Domingos
@@ -26,6 +27,10 @@ from dropbox_tools import upload
 from search_optimize import (soft_hinge_loss, accuracy, accuracy_topk, 
                              SearchOptimizer, RandomGradOptimizer)
 from search_models import ToyNet, ConvNet4, ConvNet8, Step
+
+
+# Fixes error with using CUDA and separate processes
+multiprocessing.set_start_method("spawn")
 
 
 def get_args():
