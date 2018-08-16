@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import torch.optim as optim
+import torch.multiprocessing as multiprocessing
 from torch.multiprocessing import Process
 
 # Friesen and Domingos
@@ -773,6 +774,7 @@ def store_step_data(model, label, target_loss, train_step, log_dir, layer=2):
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn")
     args = get_args()
     for i in range(args.runs):
         print("\nStarting training run " + str(i+1) + "...\n")
