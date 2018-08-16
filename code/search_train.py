@@ -5,13 +5,13 @@ import argparse
 from functools import partial
 from itertools import chain
 from time import time
-from multiprocessing import Process
 
 # pytorch
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import torch.optim as optim
+from torch.multiprocessing import Process
 
 # Friesen and Domingos
 import activations
@@ -150,7 +150,7 @@ def get_args():
         args.no_aug = True if args.dataset == "mnist" else False
     args.grad_tp_rule = tp.TPRule[args.grad_tp_rule]
     args.perturb_sizes = (args.perturb_sizes if isinstance(args.perturb_sizes, list) 
-                          else [args.perturb_sizes])
+                          or args.perturb_sizes is None else [args.perturb_sizes])
     
     return args
 
