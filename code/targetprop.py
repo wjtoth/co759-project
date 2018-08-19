@@ -271,17 +271,20 @@ class TPRule(Enum):
         return grad_input, None
 
     @staticmethod
-    def tanh_backward(step_input, grad_output, target, is01, 
-                      xscale=1.0, yscale=1.0, velocity=None, momentum_factor=0, 
-                      return_target=False):
-        # assert not is01
+    def tanh_backward(step_input, grad_output, target, is01, xscale=1.0, 
+                      yscale=1.0, tanh_factor=1.0, include_target=False, velocity=None, 
+                      momentum_factor=0, return_target=False):
+        assert not is01
         if velocity is not None:
             momentum_term = momentum_factor * velocity
         else:
             momentum_term = 0
         if target is None:
             target = torch.sign(momentum_term - grad_output)
-        z = soft_hinge(step_input, target, xscale=xscale, yscale=1.0) - 1
+        if include_target:
+            z = soft_hinge(step_input, target, xscale=xscale, yscale=1.0) - 1
+        else:
+            z = torch.tanh(step_input*tanh_factor)
         grad_input = (1 - z * z) * xscale * yscale * -target / grad_output.size(0)
         return grad_input, target if return_target else None
 

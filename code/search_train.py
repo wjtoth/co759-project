@@ -65,6 +65,7 @@ def get_args():
     parser.add_argument("--grad-tp-rule", type=str, default="SoftHinge",
                         choices=("WtHinge", "TruncWtHinge", "SoftHinge", 
                                  "STE", "SSTE", "SSTEAndTruncWtHinge"))
+    parser.add_argument("--softhinge-factor", type=float, default=1.0)
     parser.add_argument("--comb-opt", action="store_true", default=False,
                         help="if specified, combinatorial optimization methods " 
                              "are used for target setting")
@@ -176,12 +177,14 @@ def main(args):
         nonlin = partial(Step, make01=True, targetprop_rule=args.grad_tp_rule, 
                          use_momentum=args.target_momentum, 
                          momentum_factor=args.target_momentum_factor,
-                         scale_by_grad_out=not args.no_loss_grad_weight)
+                         scale_by_grad_out=not args.no_loss_grad_weight,
+                         tanh_factor=args.softhinge_factor)
     elif args.nonlin == "step11":
         nonlin = partial(Step, make01=False, targetprop_rule=args.grad_tp_rule,
                          use_momentum=args.target_momentum, 
                          momentum_factor=args.target_momentum_factor, 
-                         scale_by_grad_out=not args.no_loss_grad_weight)
+                         scale_by_grad_out=not args.no_loss_grad_weight,
+                         tanh_factor=args.softhinge_factor)
     elif args.nonlin == "staircase":
         nonlin = partial(activations.Staircase, targetprop_rule=args.grad_tp_rule,
                          nsteps=5, margin=1, trunc_thresh=2,

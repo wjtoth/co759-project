@@ -1,5 +1,6 @@
 # python
 from collections import OrderedDict
+from functools import partial
 
 # pytorch
 import torch
@@ -19,14 +20,15 @@ class StepF(Function):
     """
 
     def __init__(self, targetprop_rule=tp.TPRule.WtHinge, make01=False, 
-                 scale_by_grad_out=False, use_momentum=False, momentum_factor=0,
-                 momentum_state=None, batch_labels=None):
+                 scale_by_grad_out=False, tanh_factor=1.0, use_momentum=False, 
+                 momentum_factor=0, momentum_state=None, batch_labels=None):
         super().__init__()
         self.tp_rule = targetprop_rule
         self.make01 = make01
         self.scale_by_grad_out = scale_by_grad_out
         self.target = None
         self.saved_grad_out = None
+        self.tanh_factor = tanh_factor
         self.use_momentum = use_momentum
         self.momentum_factor = momentum_factor
         self.momentum_state = momentum_state
@@ -47,6 +49,8 @@ class StepF(Function):
             # where t \in {-1, 0, 1} (t = 0 means ignore this unit)
             go = grad_output if self.saved_grad_out is None else self.saved_grad_out
             tp_grad_func = tp.TPRule.get_backward_func(self.tp_rule)
+            if self.tp_rule.value == 27:
+                tp_grad_func = partial(tp_grad_func, tanh_factor=self.tanh_factor)
             if self.use_momentum:
                 momentum_tensor = self.momentum_state[
                     range(self.batch_labels.shape[0]), self.batch_labels]
@@ -66,11 +70,13 @@ class StepF(Function):
 
 class Step(nn.Module):
     def __init__(self, targetprop_rule=tp.TPRule.TruncWtHinge, make01=False, 
-                 scale_by_grad_out=False, use_momentum=False, momentum_factor=0):
+                 scale_by_grad_out=False, tanh_factor=1.0, use_momentum=False, 
+                 momentum_factor=0):
         super().__init__()
         self.tp_rule = targetprop_rule
         self.make01 = make01
         self.scale_by_grad_out = scale_by_grad_out
+        self.tanh_factor = tanh_factor
         self.output_hook = None
         self.use_momentum = use_momentum
         self.momentum_factor = momentum_factor
@@ -79,6 +85,7 @@ class Step(nn.Module):
         if use_momentum:
             self.function = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
                                   scale_by_grad_out=self.scale_by_grad_out, 
+                                  tanh_factor=self.tanh_factor,
                                   use_momentum=self.use_momentum, 
                                   momentum_factor=self.momentum_factor, 
                                   momentum_state=self.momentum_state,
@@ -102,6 +109,7 @@ class Step(nn.Module):
     def forward(self, x):
         function = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
                          scale_by_grad_out=self.scale_by_grad_out, 
+                         tanh_factor=self.tanh_factor,
                          use_momentum=self.use_momentum, 
                          momentum_factor=self.momentum_factor, 
                          batch_labels=self.batch_labels)
