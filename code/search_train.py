@@ -678,7 +678,7 @@ def store_checkpoint(model, optimizers, terminal_args, training_metrics,
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     optimizer_states = ([optimizer.state_dict() for optimizer in optimizers]
-                        if isinstance(optimizers, list) else optimizer.state_dict())
+                        if isinstance(optimizers, list) else optimizers.state_dict())
     checkpoint_state = {
         "args": terminal_args,
         "model_state": model.state_dict(),
@@ -694,7 +694,7 @@ def store_checkpoint(model, optimizers, terminal_args, training_metrics,
     print("\nModel checkpoint saved at: " 
           + "\\".join(file_path.split("\\")[-2:]) + "\n")
     # delete old checkpoint
-    if epoch > 9:
+    if epoch > 9 and epoch % 10 != 0:
         previous = os.path.join(
             log_dir, "checkpoint_epoch{}.state".format(epoch-10))
         if os.path.exists(previous) and os.path.isfile(previous):
@@ -777,11 +777,13 @@ def store_step_data(model, label, target_loss, train_step, log_dir, layer=2):
 
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method("spawn")
     args = get_args()
-    for i in range(args.runs):
-        print("\nStarting training run " + str(i+1) + "...\n")
-        # Run in separate process to avoid PyTorch multiprocessing errors
-        process = Process(target=main, args=(args,))
-        process.start()
-        process.join()
+    main(args)
+    # multiprocessing.set_start_method("spawn")
+    # args = get_args()
+    # for i in range(args.runs):
+    #     print("\nStarting training run " + str(i+1) + "...\n")
+    #     # Run in separate process to avoid PyTorch multiprocessing errors
+    #     process = Process(target=main, args=(args,))
+    #     process.start()
+    #     process.join()
