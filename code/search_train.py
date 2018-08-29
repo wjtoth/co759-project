@@ -345,7 +345,8 @@ class Metrics(dict):
 
     def __getitem__(self, key):
         if isinstance(key, int):
-            item = {key: values[key] for metric, values in self.items()}
+            item = {metric: values[key] for metric, values in self.items() 
+                    if isinstance(values, list)}
         else:
             item = super().__getitem__(key)
         return item
@@ -705,7 +706,7 @@ def load_checkpoint(log_dir, epoch=None):
     if epoch is None:
         checkpoint_files = [file_name for file_name in os.listdir(log_dir)
                             if file_name.startswith("checkpoint")]
-        checkpoint_files.sort()
+        checkpoint_files.sort(key=lambda string: int(string[16:-6]))
     else:
         checkpoint_files = [
             file_name for file_name in os.listdir(log_dir)
@@ -777,13 +778,11 @@ def store_step_data(model, label, target_loss, train_step, log_dir, layer=2):
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn")
     args = get_args()
-    main(args)
-    # multiprocessing.set_start_method("spawn")
-    # args = get_args()
-    # for i in range(args.runs):
-    #     print("\nStarting training run " + str(i+1) + "...\n")
-    #     # Run in separate process to avoid PyTorch multiprocessing errors
-    #     process = Process(target=main, args=(args,))
-    #     process.start()
-    #     process.join()
+    for i in range(args.runs):
+        print("\nStarting training run " + str(i+1) + "...\n")
+        # Run in separate process to avoid PyTorch multiprocessing errors
+        process = Process(target=main, args=(args,))
+        process.start()
+        process.join()
