@@ -1,15 +1,16 @@
-
 import numpy as np
 from torch import nn
 
 try:
     import foolbox
-
+except ImportError:
+    print("foolbox could not be imported...")
+else:
     ATTACKS = {
-    "fgsm": {"class": foolbox.attacks.FGSM, 
+    "fgsm": {"class": foolbox.attacks.GradientSignAttack, 
              "kwargs": {}},
-    "iterative_fgsm": {"class": foolbox.attacks.IterativeGradientSignAttack,
-                       "kwargs": {"steps": 10}},
+    "iterative_fgsm": {"class": foolbox.attacks.L2BasicIterativeAttack,
+                       "kwargs": {"iterations": 10}},
     "deep_fool": {"class": foolbox.attacks.DeepFoolAttack, 
                   "kwargs": {"steps": 25, "subsample": 10}},
     "saliency_map": {"class": foolbox.attacks.SaliencyMapAttack,
@@ -21,16 +22,12 @@ try:
     "boundary_attack": {"class": foolbox.attacks.BoundaryAttack,
                         "kwargs": {"iterations": 50, "log_every_n_steps": 500}},
     }
-
     CRITERIA = {
         "untargeted_misclassify": foolbox.criteria.Misclassification(),
         "untargeted_top5_misclassify": foolbox.criteria.TopKMisclassification(5),
         "targeted_correct_class": foolbox.criteria.TargetClass,
     }
 
-except ImportError:
-    ATTACKS = {"error foolbox not available": {}}
-    print('foolbox was not loaded...')
 
 def generate_adversarial_examples(model, attack, dataset, criterion, 
                                   pixel_bounds=(0, 255), num_classes=10, 
@@ -47,7 +44,10 @@ def generate_adversarial_examples(model, attack, dataset, criterion,
         attack_kwargs = attack["kwargs"]
         attack = attack["class"]
         if "fgsm" in attack_string:
-            attack_kwargs["epsilons"] = [epsilon]
+            if attack_string == "fgsm":
+                attack_kwargs["epsilons"] = [epsilon]
+            else:
+                attack_kwargs["epsilon"] = epsilon
     if isinstance(criterion, str):
         criterion = CRITERIA[criterion.strip().lower()]
         if target_class is not None:

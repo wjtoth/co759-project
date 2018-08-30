@@ -41,6 +41,7 @@ def get_args():
 
     # training/optimization arguments
     parser.add_argument("--no-train", action="store_true", default=False)
+    parser.add_argument("--load-checkpoint", type=str, default=None)
     parser.add_argument("--batch", type=int, default=64,
                         help="batch size to use for training")
     parser.add_argument("--epochs", type=int, default=10,
@@ -240,12 +241,13 @@ def main(args):
     log_dir = os.path.join(os.path.join(os.curdir, "logs"), str(round(time())))
     tb_logger = TensorBoardLogger(log_dir) if args.tb_logging else None
 
-    if args.no_train:
-        print("Loading from last checkpoint...")
-        checkpoint_state = load_checkpoint(os.path.join(os.curdir, "logs"))
+    if args.load_checkpoint is not None:
+        print("Loading from checkpoint", args.load_checkpoint + "...")
+        checkpoint_state = load_checkpoint(
+            os.path.join(os.path.join(os.curdir, "logs"), args.load_checkpoint))
         model_state = checkpoint_state["model_state"]
         network.load_state_dict(model_state)
-    else:
+    if not args.no_train:
         print("Creating loss function...")
         if args.loss == "cross_entropy":
             criterion = torch.nn.CrossEntropyLoss(
@@ -781,7 +783,7 @@ if __name__ == "__main__":
     multiprocessing.set_start_method("spawn")
     args = get_args()
     for i in range(args.runs):
-        print("\nStarting training run " + str(i+1) + "...\n")
+        print("\nStarting experiment " + str(i+1) + "...\n")
         # Run in separate process to avoid PyTorch multiprocessing errors
         process = Process(target=main, args=(args,))
         process.start()
