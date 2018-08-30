@@ -20,7 +20,7 @@ else:
     "local_search": {"class": foolbox.attacks.LocalSearchAttack,
                      "kwargs": {"R": 25}},
     "boundary_attack": {"class": foolbox.attacks.BoundaryAttack,
-                        "kwargs": {"iterations": 50, "log_every_n_steps": 500}},
+                        "kwargs": {"iterations": 50, "log_every_n_steps": 0}},
     }
     CRITERIA = {
         "untargeted_misclassify": foolbox.criteria.Misclassification(),
