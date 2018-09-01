@@ -296,20 +296,17 @@ def main(args):
     if args.adv_eval:
         print("Evaluating on adversarial examples...")
         if args.adv_attack == "all":
-            for attack in adversarial.ATTACKS:
-                with torch.cuda.device(args.device):
-                    failure_rate = evaluate_adversarially(
-                        network, adversarial_eval_dataset, "untargeted_misclassify", 
-                        attack, args.test_batch, num_classes, 
-                        args.adv_epsilon, args.cuda)
-                print("Failure rate: %0.2f%%" % (100*failure_rate))
+            attacks = adversarial.ATTACKS.keys()
         else:
+            attacks = [args.adv_attack]
+        for attack in attacks:
             with torch.cuda.device(args.device):
+                print("Evaluating against attack", attack + "...")
                 failure_rate = evaluate_adversarially(
                     network, adversarial_eval_dataset, "untargeted_misclassify", 
-                    args.adv_attack, args.test_batch, num_classes, 
+                    attack, args.test_batch, num_classes, 
                     args.adv_epsilon, args.cuda)
-            print("Failure rate: %0.2f%%" % (100*failure_rate))
+            print("Failure rate: %0.2f%%" % (100*failure_rate), "\n")
 
     if args.logs_to_dbx:
         upload(log_dir, token=args.dbx_token)
