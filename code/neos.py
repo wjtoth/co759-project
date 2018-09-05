@@ -53,6 +53,15 @@ def parse_args():
 
 
 def generate_job(job_file_path, model_file_path, data_file_path, command_file_path):
+    with open(model_file_path) as model_file:
+        model_string = model_file.read()
+    with open(data_file_path) as data_file:
+        data_string = data_file.read()
+    if command_file_path:
+        with open(command_file_path) as command_file:
+            command_string = command_file.read()
+    else:
+        command_string = ""
     job_string = """<document>
         <category>minco</category>
         <solver>BARON</solver>
@@ -74,7 +83,7 @@ def generate_job(job_file_path, model_file_path, data_file_path, command_file_pa
       
         ]]></comments>
 
-        </document>""".format(model_file_path, data_file_path, command_file_path)
+        </document>""".format(model_string, data_string, command_string)
     with open(job_file_path, "w+") as job_file:
         job_file.write(job_string)
 
@@ -124,6 +133,8 @@ def process_job(action, server="https://neos-server.org:3333",
 
 
 if __name__ == '__main__':
+    start_time = time.time()
     args = parse_args()
     generate_job(args.action, args.model_file, args.data_file, args.command_file)
     process_job(args.action, args.server, args.username, args.password)
+    print(time.time() - start_time)
