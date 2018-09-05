@@ -27,6 +27,7 @@ from dropbox_tools import upload
 from search_optimize import (soft_hinge_loss, accuracy, accuracy_topk, 
                              SearchOptimizer, RandomGradOptimizer)
 from search_models import ToyNet, ConvNet4, ConvNet8, Step
+from neos import run_neos_job
 
 
 def get_args():
@@ -61,6 +62,10 @@ def get_args():
                         help="if specified, collects model data "
                              "at various training steps for AMPL optimization; "
                              "currently only available for ToyNet model.")
+    parser.add_argument("--collect-timesteps", type=int, nargs="+", 
+                        default=[0, 10, 100, 1000, 10000, 50000])
+    parser.add_argument("--collect-count", type=int, default=1,
+                        help="if collect_params, collect data of this many targets")
 
     # target propagation arguments
     parser.add_argument("--grad-tp-rule", type=str, default="SoftHinge",
@@ -503,11 +508,11 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                 loss_grad = postactivations[j].grad
             optimizer.step()
             
-    if (step in [0, 10, 100, 1000, 10000, 50000] 
-            and args.model == "toynet" and args.collect_params):
+    if args.collect_params and step in args.collect_timesteps and args.model == "toynet":
         target_loss = loss_function(modules[0][0](targets.float()), output_targets)
-        store_step_data(model, output_targets[10], target_loss[10].item(), 
-                        step, os.path.join(log_dir, "run_data"))
+        for i in range(args.collect_count):
+            store_step_data(model, output_targets[i], target_loss[i].item(), 
+                            i, step, i == 1, os.path.join(log_dir, "run_data"))
     if not train_per_layer:
         if args.target_momentum:
             for activation in activations:
@@ -732,7 +737,18 @@ def correct_format(row_string, index=None):
     return corrected_string
 
 
-def store_step_data(model, label, target_loss, train_step, log_dir, layer=2):
+def compute_optimal_targets(log_dir, target_index, train_step, 
+                            model_file_path="toy_model.tex", baron_options=None):
+    data_file_path = os.path.join(
+        log_dir, "data" + str(target_index) + "_step" + str(train_step))
+    optimal_target_data = run_neos_job(
+        model_file_path, data_file_path, display_variable_data=True, 
+        baron_options=baron_options)
+    return optimal_target_data
+
+
+def store_step_data(model, label, target_loss, target_index, 
+                    train_step, store_params, log_dir, layer=2):
     if not os.path.exists(log_dir):
         os.mkdir(log_dir)
     torch.set_printoptions(threshold=1000000, linewidth=1000000)
@@ -755,23 +771,25 @@ def store_step_data(model, label, target_loss, train_step, log_dir, layer=2):
     weight_string = "\n".join(weight_rows)
     bias_string = "\n".join(bias_rows)
     label_string = "\n".join(label_rows)
-    with open(weight_file_name, "w+") as weight_file:
-        print(weight_string, file=weight_file)
-    with open(weight_file_name.replace("weight", "bias"), "w+") as bias_file:
-        print(bias_string, file=bias_file)
-    with open(weight_file_name.replace("weight", "target"), "w+") as label_file:
+    if store_params:
+        with open(weight_file_name, "w+") as weight_file:
+            print(weight_string, file=weight_file)
+        with open(weight_file_name.replace("weight", "bias"), "w+") as bias_file:
+            print(bias_string, file=bias_file)
+    target_file_name = weight_file_name.replace("weight", "target" + str(target_index))
+    with open(target_file_name, "w+") as label_file:
         print(label_string, file=label_file)
 
-    data_string = "data;\n\nparam M:=100 ;\nparam N:=10 ;\n\n\n"
+    data_string = "data ;\n\nparam M:=100 ;\nparam N:=10 ;\n\n\n"
     data_string += "param T:\n\t" + "\t".join(str(i) for i in range(1, 11)) + " :=\n"
     data_string += label_string + " ;\n\n\n"
     data_string += "param B:\n\t" + "\t".join(str(i) for i in range(1, 11)) + " :=\n"
     data_string += bias_string + " ;\n\n\n"
     data_string += "param W:\n\t\t" + "\t\t".join(str(i) for i in range(1, 11)) + " :=\n"
     data_string += weight_string + "  ;"
-    with open(weight_file_name.replace("weight", "data"), "w+") as data_file:
+    with open(target_file_name.replace("target", "data"), "w+") as data_file:
         print(data_string, file=data_file)
-    with open(weight_file_name.replace("weight", "loss"), "w+") as loss_file:
+    with open(target_file_name.replace("target", "loss"), "w+") as loss_file:
         print(target_loss, file=loss_file)
     torch.set_printoptions(profile="default")
 
