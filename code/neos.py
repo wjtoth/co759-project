@@ -52,18 +52,46 @@ def parse_args():
     return parser.parse_args()
 
 
-def generate_commands(displayed_variable="target", baron_options=None):
+def generate_commands(displayed_variable="target", baron_options=None, batched_data=False):
     command_string = ""
     if baron_options is not None:
         command_string += "option baron_options '"
         for keyword, value in baron_options.items():
             if value is not None:
                 command_string += keyword + "=" + str(value) + " "
+            else:
+                command_string += keyword + " "
         command_string = command_string.rstrip() + "';\n"
-    command_string += "solve;\n"
+    if batched_data:
+        command_string += "for {e in ELEMENTS}{\nlet E := e;\nsolve;\n}\n"
+    else:
+        command_string += "solve;\n"
     if displayed_variable:
         command_string += "display {}".format(displayed_variable)
     return command_string + ";"
+
+
+def combine_data_files(data_file_paths, file_name=None):
+    data_strings = []
+    for file_path in data_file_paths:
+        with open(file_path) as data_file:
+            data_string = data_file.read()
+        data_strings.append(data_string)
+
+    combined_data = data_strings[0].splitlines()
+    combined_data[8] = combined_data[8][:-1]
+    for i, data_string in enumerate(data_strings[1:]):
+        target_string = data_string.splitlines()[8][:-1]
+        combined_data.insert(9+i, str(2+i) + target_string[1:])
+    combined_data[9+i] += ";"
+    combined_data.insert(2, "param BatchSize:={} ;".format(len(data_file_paths)))
+    combined_data = "\n".join(combined_data)
+
+    file_name = "data_batch.txt" if file_name is None else file_name
+    combined_file_path = os.path.join(os.path.split(data_file_paths[0])[0], file_name)
+    with open(combined_file_path, "w+") as data_file:
+        data_file.write(combined_data)
+    return combined_file_path
 
 
 def generate_job(model_file_path, data_file_path, 
@@ -101,7 +129,7 @@ def generate_job(model_file_path, data_file_path,
 
 
 def process_job(job_string, server="https://neos-server.org:3333", 
-                username=None, password=None, log_output=False):
+                username=None, password=None, log_output=False, log_only_results=True):
     neos = xmlrpclib.ServerProxy(server)
     alive = neos.ping()
     if alive != "NeosServer is alive\n":
@@ -125,17 +153,18 @@ def process_job(job_string, server="https://neos-server.org:3333",
             sys.stderr.write("NEOS Server error: %s\n" % password)
             sys.exit(1)
         else:
-            offset = 0
-            status = ""
             output = ""
-            while status != "Done":
-                time.sleep(1)
-                (msg, offset) = neos.getIntermediateResults(job_number, password, offset)
-                msg = msg.data.decode()
-                output += msg
-                if log_output:
-                    sys.stdout.write(msg)
-                status = neos.getJobStatus(job_number, password)
+            if not log_only_results:
+                offset = 0
+                status = ""
+                while status != "Done":
+                    time.sleep(0.5)
+                    (msg, offset) = neos.getIntermediateResults(job_number, password, offset)
+                    msg = msg.data.decode()
+                    output += msg
+                    if log_output:
+                        sys.stdout.write(msg)
+                    status = neos.getJobStatus(job_number, password)
             msg = neos.getFinalResults(job_number, password).data.decode()
             output += msg
             if log_output:
@@ -143,32 +172,58 @@ def process_job(job_string, server="https://neos-server.org:3333",
         return output
 
 
-def parse_output(job_output_string):
-    output = job_output_string.split("BARON")[1]
-    loss = float(re.search(r"Objective (\d.\d+)", output)[1])
-    if ":=" in output:
-        target = re.findall(r"\d\D(\d)\D", output.split(":=")[1])
-        target = torch.tensor([int(value) for value in target])
+def parse_output(job_output_string, batched_data=False):
+    if batched_data:
+        instances = job_output_string.split("BARON")[1:]
+        losses = []
+        for instance_output in instances:
+            loss = float(re.search(r"Objective (\d.\d+)", instance_output)[1])
+            losses.append(loss)
+        output = instances[-1]
+        if ":=" in output:
+            batch_size = len(re.findall(r"\d", output.splitlines()[3]))
+            output = output.split(":=")[1]
+            target_values = re.findall(r"[ \t\r\f\v](\d)", output)
+            targets = []
+            for i in range(batch_size):
+                target = [int(value) for j, value in enumerate(target_values) 
+                          if j % batch_size == i]
+                targets.append(torch.tensor(target))
+        else:
+            targets = None
     else:
-        target = None
-    return {"loss": loss, "target": target}
+        output = job_output_string.split("BARON")[-1]
+        loss = float(re.search(r"Objective (\d.\d+)", output)[1])
+        if ":=" in output:
+            target = re.findall(r"\d\D(\d)\D", output.split(":=")[1])
+            target = torch.tensor([int(value) for value in target])
+        else:
+            target = None
+        losses, targets = [loss], [target] if target is not None else None
+    return {"losses": losses, "targets": targets}
 
 
-def run_neos_job(model_file_path, data_file_path, display_variable_data=False, 
-                 baron_options=None, log_output=False):
+def run_neos_job(model_file_path, data_file_paths, display_variable_data=False, 
+                 baron_options=None, log_output=False, batched_data=False):
+    if isinstance(data_file_paths, list):
+        batched_data = True
+        data_file_path = combine_data_files(data_file_paths)
+    else:
+        data_file_path = data_file_paths
     if display_variable_data:
-        commands = generate_commands("target", baron_options)
+        commands = generate_commands("target", baron_options, batched_data)
     else:
-        commands = generate_commands(None, baron_options)
+        commands = generate_commands(None, baron_options, batched_data)
     job_string = generate_job(model_file_path, data_file_path, commands)
     output = process_job(job_string, log_output=log_output)
-    return parse_output(output)
+    return parse_output(output, batched_data)
 
 
 if __name__ == '__main__':
     start_time = time.time()
     args = parse_args()
     results = run_neos_job(args.model_file, args.data_file, 
-                           display_variable_data=True, log_output=False)
+                           display_variable_data=True, log_output=True,
+                           baron_options=None, batched_data=True)
     print(results)
     print(time.time() - start_time)

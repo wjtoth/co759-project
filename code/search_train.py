@@ -2,11 +2,13 @@
 import os
 import re
 import argparse
+import json
 from functools import partial
 from itertools import chain
 from time import time
 
-# pytorch
+# pytorch / numpy
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -22,6 +24,7 @@ from util.tensorboardlogger import TensorBoardLogger
 
 # ours
 import adversarial
+import utils
 from graph_nn import get_graphs
 from dropbox_tools import upload
 from search_optimize import (soft_hinge_loss, accuracy, accuracy_topk, 
@@ -66,6 +69,11 @@ def get_args():
                         default=[0, 10, 100, 1000, 10000, 50000])
     parser.add_argument("--collect-count", type=int, default=1,
                         help="if collect_params, collect data of this many targets")
+    parser.add_argument("--ampl-train", action="store_true", default=False)
+    parser.add_argument("--ampl-train-steps", type=int, default=625)
+    parser.add_argument("--ampl-eval", action="store_true", default=False)
+    parser.add_argument("--ampl-eval-dir", type=str, default=None)
+    parser.add_argument("--baron-options", type=str, default=None)
 
     # target propagation arguments
     parser.add_argument("--grad-tp-rule", type=str, default="SoftHinge",
@@ -159,6 +167,8 @@ def get_args():
     args.grad_tp_rule = tp.TPRule[args.grad_tp_rule]
     args.perturb_sizes = (args.perturb_sizes if isinstance(args.perturb_sizes, list) 
                           or args.perturb_sizes is None else [args.perturb_sizes])
+    if args.baron_options is not None:
+        args.baron_options = json.load(args.baron_options)
     
     return args
 
@@ -298,8 +308,19 @@ def main(args):
             else:
                 print("\nFinished training.\n")
 
+    if args.ampl_eval:
+        ampl_data_dir = args.ampl_eval_dir or log_dir
+        for time_step in args.collect_timesteps:
+            optimal_target_data = compute_optimal_targets(
+                time_step, data_dir=ampl_data_dir, baron_options=args.baron_options)
+            optimal_target_data = store_target_data(optimal_target_data, ampl_data_dir)
+            print("\nStep", time_step, "optimal target loss mean:", 
+                  optimal_target_data["loss_mean"])
+            print("Step", time_step, "optimal target loss standard error:", 
+                  optimal_target_data["loss_std_error"])
+
     if args.adv_eval:
-        print("Evaluating on adversarial examples...")
+        print("\nEvaluating on adversarial examples...")
         if args.adv_attack == "all":
             attacks = adversarial.ATTACKS.keys()
         else:
@@ -489,19 +510,29 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                     loss *= torch.abs(loss_grad)
                 loss = loss.sum()
             if j != len(modules)-1:
-                activation = model.all_activations[len(modules)-1-j-1](
-                    preactivations[j+1].detach())
-                if args.model == "convnet4":
-                    perturb_sizes = args.perturb_sizes or [7000, 15000, 30000]
-                elif args.model == "toynet":
-                    perturb_sizes = args.perturb_sizes or [1000]
-                perturb_schedule = partial(
-                    perturb_scheduler, perturb_sizes=perturb_sizes)
-                targets, target_loss = target_optimizer.step(
-                    step, j, targets, 
-                    base_targets=[[None, 1/1, perturb_schedule]], 
-                    criterion_weight=(None if j == 0 or args.no_criterion_grad_weight 
-                                      else torch.abs(loss_grad)))
+                if args.ampl_train and step < args.ampl_train_steps:
+                    data_strings = []
+                    for i in range(args.batch):
+                        data_string = parse_step_data(model, targets[i], i, step)
+                        data_strings.append(data_string)
+                    optimal_target_data = compute_optimal_targets(
+                        step, data_strings=data_strings, 
+                        baron_options=args.baron_options)
+                    targets = torch.stack(optimal_target_data["targets"])
+                else:
+                    activation = model.all_activations[len(modules)-1-j-1](
+                        preactivations[j+1].detach())
+                    if args.model == "convnet4":
+                        perturb_sizes = args.perturb_sizes or [7000, 15000, 30000]
+                    elif args.model == "toynet":
+                        perturb_sizes = args.perturb_sizes or [1000]
+                    perturb_schedule = partial(
+                        perturb_scheduler, perturb_sizes=perturb_sizes)
+                    targets, target_loss = target_optimizer.step(
+                        step, j, targets, 
+                        base_targets=[[None, 1/1, perturb_schedule]], 
+                        criterion_weight=(None if j == 0 or args.no_criterion_grad_weight 
+                                          else torch.abs(loss_grad)))
             optimizer.zero_grad()
             loss.backward()
             if j != len(modules)-1:
@@ -511,8 +542,8 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
     if args.collect_params and step in args.collect_timesteps and args.model == "toynet":
         target_loss = loss_function(modules[0][0](targets.float()), output_targets)
         for i in range(args.collect_count):
-            store_step_data(model, output_targets[i], target_loss[i].item(), 
-                            i, step, i == 1, os.path.join(log_dir, "run_data"))
+            parse_step_data(model, output_targets[i], i, step, 
+                            os.path.join(log_dir, "run_data"), target_loss[i].item())
     if not train_per_layer:
         if args.target_momentum:
             for activation in activations:
@@ -737,19 +768,9 @@ def correct_format(row_string, index=None):
     return corrected_string
 
 
-def compute_optimal_targets(log_dir, target_index, train_step, 
-                            model_file_path="toy_model.tex", baron_options=None):
-    data_file_path = os.path.join(
-        log_dir, "data" + str(target_index) + "_step" + str(train_step))
-    optimal_target_data = run_neos_job(
-        model_file_path, data_file_path, display_variable_data=True, 
-        baron_options=baron_options)
-    return optimal_target_data
-
-
-def store_step_data(model, label, target_loss, target_index, 
-                    train_step, store_params, log_dir, layer=2):
-    if not os.path.exists(log_dir):
+def parse_step_data(model, label, target_index, train_step, log_dir=None, 
+                    target_loss=None, store_data=True, layer=2):
+    if log_dir is not None and not os.path.exists(log_dir):
         os.mkdir(log_dir)
     torch.set_printoptions(threshold=1000000, linewidth=1000000)
     parameters = list(model.parameters())
@@ -759,7 +780,7 @@ def store_step_data(model, label, target_loss, target_index,
     bias_rows = re.findall(r"\[.*?\]", str(bias_vector))
     weight_rows = [correct_format(row, index=i+1) for i, row in enumerate(weight_rows)]
     bias_rows = [correct_format(row, index=i+1) for i, row in enumerate(bias_rows)]
-    weight_file_name = os.path.join(log_dir, "weight_step" + str(train_step) + ".txt")
+    torch.set_printoptions(profile="default")
 
     if label.numel() == 1:
         label_vector = torch.zeros(10)
@@ -771,14 +792,6 @@ def store_step_data(model, label, target_loss, target_index,
     weight_string = "\n".join(weight_rows)
     bias_string = "\n".join(bias_rows)
     label_string = "\n".join(label_rows)
-    if store_params:
-        with open(weight_file_name, "w+") as weight_file:
-            print(weight_string, file=weight_file)
-        with open(weight_file_name.replace("weight", "bias"), "w+") as bias_file:
-            print(bias_string, file=bias_file)
-    target_file_name = weight_file_name.replace("weight", "target" + str(target_index))
-    with open(target_file_name, "w+") as label_file:
-        print(label_string, file=label_file)
 
     data_string = "data ;\n\nparam M:=100 ;\nparam N:=10 ;\n\n\n"
     data_string += "param T:\n\t" + "\t".join(str(i) for i in range(1, 11)) + " :=\n"
@@ -787,11 +800,43 @@ def store_step_data(model, label, target_loss, target_index,
     data_string += bias_string + " ;\n\n\n"
     data_string += "param W:\n\t\t" + "\t\t".join(str(i) for i in range(1, 11)) + " :=\n"
     data_string += weight_string + "  ;"
-    with open(target_file_name.replace("target", "data"), "w+") as data_file:
-        print(data_string, file=data_file)
-    with open(target_file_name.replace("target", "loss"), "w+") as loss_file:
-        print(target_loss, file=loss_file)
-    torch.set_printoptions(profile="default")
+
+    if store_data:
+        data_file_name = os.path.join(log_dir, "data_step" + str(train_step) + ".txt")
+        with open(data_file_name, "w+") as data_file:
+            print(data_string, file=data_file)
+        with open(data_file_name.replace("data", "loss"), "w+") as loss_file:
+            print(target_loss, file=loss_file)
+
+    return data_string
+
+
+def compute_optimal_targets(train_step, data_dir=None, data_strings=None, 
+                            model_file_path="toy_model_batch.tex", 
+                            target_index=None, baron_options=None):
+    if target_index is not None:
+        data_file_path = os.path.join(
+            data_dir, "data" + str(target_index) + "_step" + str(train_step))
+        data_files_paths = data_file_path
+    else:
+        data_files_paths = utils.file_findall(
+            data_dir, r"data\d+_step" + str(train_step) + r"\.txt")
+    optimal_target_data = run_neos_job(
+        model_file_path, data_file_paths, display_variable_data=True, 
+        baron_options=baron_options)
+    optimal_target_data["step"] = train_step
+    return optimal_target_data
+
+
+def store_target_data(target_data, data_dir):
+    loss_mean = np.mean(target_data["losses"])
+    loss_std_error = (np.std(target_data["losses"]) 
+                      / np.sqrt(len(target_data["losses"])))
+    target_data.update({"loss_mean": loss_mean, "loss_std_error": loss_std_error})
+    file_path = os.path.join(
+        data_dir, "ampl_output_step" + str(target_data["step"]) + ".data")
+    torch.save(target_data, file_path)
+    return target_data
 
 
 if __name__ == "__main__":
