@@ -2,6 +2,8 @@ import numpy as np
 from functools import partial
 
 import torch
+from torch.nn import Conv2d
+from torch.nn.functional import unfold, fold
 
 
 def soft_hinge_loss(z, t, xscale=1.0, yscale=1.0, reduce_=True):
@@ -76,7 +78,8 @@ class TargetPropOptimizer:
         raise NotImplementedError
 
     def evaluate_candidates(self, modules, module_index, loss_function, targets, 
-                            candidates, activations=None, criterion_weight=None):
+                            candidates, activations=None, criterion_weight=None,
+                            average_loss=True):
         if torch.is_tensor(candidates):
             candidate_batch = candidates
         else:
@@ -113,10 +116,11 @@ class TargetPropOptimizer:
                 criterion_weight.shape[0]*criterion_weight.shape[1],
                 *criterion_weight.shape[2:])
             losses *= criterion_weight
-        losses = losses.view(len(candidates), int(np.prod(targets.shape[1:])))
-        losses = losses.mean(dim=1)  # mean everything but candidate batch dim
+        if average_loss:
+            losses = losses.view(len(candidates), int(np.prod(targets.shape[1:])))
+            losses = losses.mean(dim=1)  # mean everything but candidate batch dim
         if self.requires_grad:
-            losses.sum(dim=0).backward()
+            losses.sum().backward()
             loss_grad = candidate_batch.grad.view_as(candidates)
         if self.criterion == "loss_grad":
             loss_grad = loss_grad.view(loss_grad.shape[0], 
@@ -203,7 +207,7 @@ def multi_split(tensors, sizes):
     return tuple(torch.split(tensor, sizes) for tensor in tensors)
 
 
-def splice(tensor, region_indices):
+def splice_flat(tensor, region_indices):
     regions = region_indices.shape[1]
     tensor_trunc = tensor.clone().resize_(
         tensor.shape[0], 
@@ -229,12 +233,36 @@ def splice(tensor, region_indices):
     return spliced
 
 
-def inverse_receptive_fields(input, output, field_count, layer, model_info):
+def splice_conv(regions, splicing_info):
+    # Assumes regions is a 3D tensor of the shape output from torch.nn.Unfold
+    spliced_tensor = fold(regions, splicing_info["kernel_size"], 
+        stride=splicing_info["stride"], padding=splicing_info["kernel_size"])
+    return spliced_tensor / (splicing_info["kernel_size"]**2)  # fix summing in fold
+
+
+def inverse_receptive_fields(input_, output, per_dim_count, 
+                             layer_info, region_type="wide"):
     # Assumes first batch dimension and splits along third and fourth dimensions
-    conv_kernel = model_info[layer]["conv"]["kernel_size"]
-    padding = model_info[layer]["conv"]["padding"]
-    pool_kernel = model_info[layer]["max_pool"]["kernel_size"]
-    pass
+    conv_kernel = layer_info["conv"]["kernel_size"]
+    padding = layer_info["conv"]["padding"]
+    pool_size = layer_info["max_pool"]["kernel_size"]
+    input_region_size = input_.shape[2] // per_dim_count
+    input_regions = unfold(input_, input_region_size, stride=input_region_size)
+    if region_type == "wide":
+        output_region_size = (input_region_size + 2*(conv_kernel-1)) // pool_size
+    elif region_type == "medium":
+        output_region_size = input_region_size // pool_size
+    elif region_type == "narrow":
+        output_region_size = max(1, input_region_size - conv_kernel + 1) // pool_size
+    else:
+        raise ValueError("Unknown region type:", region_type)
+    step_size = (output.shape[2] - output_region_size) // (per_dim_count - 1)
+    output_regions = unfold(output, output_region_size, stride=step_size)
+    field_info = {
+        "input": {"kernel_size": input_region_size, "stride": input_region_size},
+        "output": {"kernel_size": output_region_size, "stride": step_size}
+    }
+    return input_regions, output_regions, field_info
 
 
 def normalized_diff(x, y, offset=3/5):
@@ -254,7 +282,7 @@ class SearchOptimizer(TargetPropOptimizer):
     def __init__(self, *args, perturb_scheduler=lambda x, y, z: 1000, candidates=64, 
                  iterations=10, searches=1, search_type="beam", 
                  perturb_type="random", candidate_type="random", 
-                 candidate_grad_delay=0, **kwargs):
+                 candidate_grad_delay=0, splice_conv_targets=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.perturb_scheduler = perturb_scheduler
         self.candidates = candidates
@@ -264,6 +292,7 @@ class SearchOptimizer(TargetPropOptimizer):
         self.perturb_type = perturb_type
         self.candidate_type = candidate_type
         self.candidate_grad_delay = candidate_grad_delay
+        self.splice_conv_targets = splice_conv_targets
         if self.perturb_type == "grad_guided" or self.candidate_type == "grad":
             self.requires_grad = True
         self.state = {"chosen_groups": []}
@@ -291,8 +320,8 @@ class SearchOptimizer(TargetPropOptimizer):
                     use_gpu=self.use_gpu))
         return torch.cat(candidates)
 
-    def find_candidates(self, module_index, module_target, train_step, 
-                        base_candidates=None, criterion_weight=None):
+    def prepare_inputs(self, module_index, module_target, 
+                       base_candidates, criterion_weight):
         loss_function = self.loss_functions[module_index]
         if self.criterion == "output_loss":
             modules = self.modules[:module_index+1]
@@ -308,6 +337,17 @@ class SearchOptimizer(TargetPropOptimizer):
             loss_function = partial(soft_hinge_loss, reduce_=False)
         target_batch = torch.stack([module_target]*(self.candidates 
             + (len(base_candidates) if base_candidates is not None else 1)))
+        splice_conv_targets = (self.splice_conv_targets 
+            and any([isinstance(layer, Conv2d) for layer in self.modules[module_index]])
+            and any([isinstance(layer, Conv2d) for layer in self.modules[module_index+1]]))
+        return (loss_function, modules, activations, 
+                criterion_weight, target_batch, splice_conv_targets)
+
+    def find_candidates(self, module_index, module_target, train_step, 
+                        base_candidates=None, criterion_weight=None):
+        (loss_function, modules, activations, criterion_weight, 
+                target_batch, splice_conv_targets) = self.prepare_inputs(
+            module_index, module_target, base_candidates, criterion_weight)
 
         search_parameters = [(round(self.candidates*weight), (self.perturb_scheduler
                              if perturb_scheduler is None else perturb_scheduler))
@@ -357,20 +397,23 @@ class SearchOptimizer(TargetPropOptimizer):
                     perturb_base_tensors, sampling_weights)
             loss_data = self.evaluate_candidates(
                 modules, module_index, loss_function, target_batch, 
-                candidate_batch, activations, criterion_weight)
+                candidate_batch, activations, criterion_weight, 
+                average_loss=not splice_conv_targets)
             group_data = multi_split(
                 (candidate_batch,) + (loss_data 
                     if isinstance(loss_data, tuple) else (loss_data,)), 
                 [count+1 for count, _ in iteration_parameters])
             candidate_batches, loss_data = group_data[0], list(zip(*group_data[1:]))
             best_candidates = self.choose_candidates(
-                loss_data, candidate_batches, beam_size)
+                loss_data, candidate_batches, beam_size, module=modules, 
+                splice_conv_targets=splice_conv_targets)
             if self.perturb_type == "grad_guided":
                 sampling_weights = [normalized_diff(loss_grad, candidate) 
                                     for candidate, _, loss_grad in best_candidates]
                 best_candidates = [(candidate, loss) 
                                    for candidate, loss, _ in best_candidates]
             parents = [candidate for candidate, loss in best_candidates]
+
         for candidate, loss in best_candidates:
             self.state["candidates"].append((candidate.long(), loss))
 
@@ -390,13 +433,12 @@ class SearchOptimizer(TargetPropOptimizer):
             self.state["chosen_groups"].append(index)
         return self.state["candidates"][index][0], loss
 
-    def choose_candidates(self, loss_data, candidate_batches, beam_size):
+    def choose_candidates(self, loss_data, candidate_batches, beam_size, 
+                          module=None, splice_conv_targets=False):
         targets = []
         for loss_tuple, candidates in zip(loss_data, candidate_batches):
             # First element of loss_data should be loss tensor
             losses = loss_tuple[0]
-            top_losses, candidate_indices = torch.topk(
-                losses, beam_size, dim=0, largest=False, sorted=True)
             if self.criterion == "loss_grad":
                 # loss and loss grad
                 loss_grad = loss_tuple[1]
@@ -411,7 +453,20 @@ class SearchOptimizer(TargetPropOptimizer):
                     grad_norm, dim=0, keepdim=True)
                 best_candidates = splice(candidates, top_region_indices)
                 targets.append((best_candidates.squeeze(0), None))
+            elif splice_conv_targets:
+                candidate_regions, loss_regions, field_info = inverse_receptive_fields(
+                    candidates, losses, self.regions, 
+                    {"conv": {"kernel_size": module[0].kernel_size[0], 
+                              "padding": module[0].padding[0]}, 
+                     "max_pool": {"kernel_size": module[1].kernel_size}})
+                top_loss_regions, region_indices = torch.topk(
+                    loss_regions, beam_size, dim=0, largest=False, sorted=True)
+                best_regions = candidate_regions[region_indices]
+                best_candidates = splice_conv(best_regions, field_info["input"])
+                targets.append((best_candidates.squeeze(0), None))
             else:
+                top_losses, candidate_indices = torch.topk(
+                    losses, beam_size, dim=0, largest=False, sorted=True)
                 best_candidates = candidates[candidate_indices]
                 if self.perturb_type == "grad_guided":
                     top_loss_grads = loss_tuple[1][candidate_indices]

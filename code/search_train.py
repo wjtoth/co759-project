@@ -109,6 +109,7 @@ def get_args():
     parser.add_argument("--candidate-type", type=str, default="random",
                         choices=("random", "grad", "grad_sampled"))
     parser.add_argument("--candidate-grad-delay", type=int, default=1)
+    parser.add_argument("--splice-conv-targets", action="store_true", default=False)
 
     # data arguments
     parser.add_argument("--dataset", type=str, default="cifar10",
@@ -279,12 +280,13 @@ def main(args):
             if args.comb_opt_method == "local_search":
                 target_optimizer = partial( 
                     SearchOptimizer, batch_size=args.batch, 
-                    criterion=args.criterion, regions=10, 
+                    criterion=args.criterion, regions=5, 
                     perturb_scheduler=partial(perturb_scheduler, [1000]), 
                     candidates=args.candidates, iterations=args.iterations, 
                     searches=args.searches, search_type=args.search_type, 
                     perturb_type=args.perturb_type, candidate_type=args.candidate_type, 
-                    candidate_grad_delay=args.candidate_grad_delay)
+                    candidate_grad_delay=args.candidate_grad_delay, 
+                    splice_conv_targets=args.splice_conv_targets)
             elif args.comb_opt_method == "genetic":
                 raise NotImplementedError(
                     "Pure genetic algorithm not currently implemented.")
