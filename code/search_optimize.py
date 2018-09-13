@@ -477,8 +477,10 @@ class SearchOptimizer(TargetPropOptimizer):
                     {"conv": {"kernel_size": module[0].kernel_size[0], 
                               "padding": module[0].padding[0]}, 
                      "max_pool": {"kernel_size": module[1].kernel_size}}, "medium")
+                print(candidate_regions.numel(), loss_regions.numel())
                 top_loss_regions, region_indices = torch.topk(
                     loss_regions, beam_size, dim=0, largest=False, sorted=True)
+                print(region_indices.numel())
                 best_regions = candidate_regions[region_indices]
                 best_candidates = splice_conv(best_regions, field_info["input"])
                 targets.append((best_candidates.squeeze(0), None))
