@@ -280,7 +280,7 @@ def main(args):
             if args.comb_opt_method == "local_search":
                 target_optimizer = partial( 
                     SearchOptimizer, batch_size=args.batch, 
-                    criterion=args.criterion, regions=5, 
+                    criterion=args.criterion, regions=3, 
                     perturb_scheduler=partial(perturb_scheduler, [1000]), 
                     candidates=args.candidates, iterations=args.iterations, 
                     searches=args.searches, search_type=args.search_type, 

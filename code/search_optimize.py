@@ -118,7 +118,9 @@ class TargetPropOptimizer:
             losses *= criterion_weight
         if average_loss:
             losses = losses.view(len(candidates), int(np.prod(targets.shape[1:])))
-            losses = losses.mean(dim=1)  # mean everything but candidate batch dim
+            losses = losses.mean(dim=1)  # mean everything but candidate batch 
+        else:
+            losses = losses.view(len(candidates), *targets.shape[1:])
         if self.requires_grad:
             losses.sum().backward()
             loss_grad = candidate_batch.grad.view_as(candidates)
@@ -243,6 +245,14 @@ def splice_conv(regions, splicing_info):
 def inverse_receptive_fields(input_, output, per_dim_count, 
                              layer_info, region_type="wide"):
     # Assumes first batch dimension and splits along third and fourth dimensions
+    orig_input_dim = input_.dim()
+    orig_output_dim = output.dim()
+    if orig_input_dim == 5:
+        orig_input = input_
+        input_ = input_.view(input_.shape[0]*input_.shape[1], *input_.shape[2:])
+    if orig_output_dim == 5:
+        orig_output = output
+        output = output.view(output.shape[0]*output.shape[1], *output.shape[2:])
     conv_kernel = layer_info["conv"]["kernel_size"]
     padding = layer_info["conv"]["padding"]
     pool_size = layer_info["max_pool"]["kernel_size"]
@@ -256,12 +266,20 @@ def inverse_receptive_fields(input_, output, per_dim_count,
         output_region_size = max(1, input_region_size - conv_kernel + 1) // pool_size
     else:
         raise ValueError("Unknown region type:", region_type)
+    # print(output.shape[2], output_region_size, per_dim_count)
     step_size = (output.shape[2] - output_region_size) // (per_dim_count - 1)
+    # print(step_size)
     output_regions = unfold(output, output_region_size, stride=step_size)
     field_info = {
         "input": {"kernel_size": input_region_size, "stride": input_region_size},
         "output": {"kernel_size": output_region_size, "stride": step_size}
     }
+    if orig_input_dim == 5:
+        input_regions = input_regions.view(
+            orig_input.shape[0], orig_input.shape[1], *input_regions.shape[1:])
+    if orig_output_dim == 5:
+        output_regions = output_regions.view(
+            orig_output.shape[0], orig_output.shape[1], *output_regions.shape[1:])
     return input_regions, output_regions, field_info
 
 
@@ -458,7 +476,7 @@ class SearchOptimizer(TargetPropOptimizer):
                     candidates, losses, self.regions, 
                     {"conv": {"kernel_size": module[0].kernel_size[0], 
                               "padding": module[0].padding[0]}, 
-                     "max_pool": {"kernel_size": module[1].kernel_size}})
+                     "max_pool": {"kernel_size": module[1].kernel_size}}, "medium")
                 top_loss_regions, region_indices = torch.topk(
                     loss_regions, beam_size, dim=0, largest=False, sorted=True)
                 best_regions = candidate_regions[region_indices]
