@@ -152,7 +152,11 @@ def get_args():
                         help="if specified, enable logging Tensorboard summaries")
     parser.add_argument("--store-checkpoints", action="store_true", default=False, 
                         help="if specified, enables storage of the current model " 
-                             "and training parameters at each epoch")
+                             "and training parameters at the best-performing "
+                             "and final epochs")
+    parser.add_argument("--store-many-checkpoints", action="store_true", default=False, 
+                        help="if specified, enables storage of the current model " 
+                             "and training parameters at every 10th epoch")
     parser.add_argument("--logs-to-dbx", action="store_true", default=False,
                         help="if specified, uploads all local log files to dropbox")
     parser.add_argument("--dbx-token", type=str)
@@ -429,9 +433,10 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             with torch.no_grad():
                 evaluate(model, eval_dataset_loader, loss_function, 
                          eval_metrics, logger, step, log=True, use_gpu=use_gpu)
-        if args.store_checkpoints:
+        if args.store_checkpoints or args.store_many_checkpoints:
             store_checkpoint(model, optimizers if train_per_layer else optimizer, 
-                             args, training_metrics, eval_metrics, epoch, log_dir)
+                             args, training_metrics, eval_metrics, epoch, log_dir, 
+                             not args.store_many_checkpoints)
     return step
 
 
@@ -669,7 +674,10 @@ def store_run_info(terminal_args, log_dir, extra_args=None):
 
 
 def store_checkpoint(model, optimizers, terminal_args, training_metrics, 
-                     eval_metrics, epoch, log_dir):
+                     eval_metrics, epoch, log_dir, only_best_last=True):
+    best_index = max(enumerate(eval_metrics["accuracy"]), key=lambda val: val[1])[0]
+    if only_best_last and best_index != epoch:
+        return
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     optimizer_states = ([optimizer.state_dict() for optimizer in optimizers]
@@ -689,9 +697,15 @@ def store_checkpoint(model, optimizers, terminal_args, training_metrics,
     print("\nModel checkpoint saved at: " 
           + "\\".join(file_path.split("\\")[-2:]) + "\n")
     # delete old checkpoint
-    if epoch > 9 and epoch % 10 != 0:
+    removed_epoch = None
+    if only_best_last and best_index == epoch and epoch != 0:
+        removed_epoch = max(enumerate(eval_metrics["accuracy"][:-1]), 
+                            key=lambda val: val[1])[0]
+    elif epoch > 9 and epoch % 10 != 0:
+        removed_epoch = epoch-10
+    if removed_epoch is not None:
         previous = os.path.join(
-            log_dir, "checkpoint_epoch{}.state".format(epoch-10))
+            log_dir, "checkpoint_epoch{}.state".format(removed_epoch))
         if os.path.exists(previous) and os.path.isfile(previous):
             os.remove(previous)
 
