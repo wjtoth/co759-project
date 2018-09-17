@@ -45,7 +45,9 @@ def get_args():
 
     # training/optimization arguments
     parser.add_argument("--no-train", action="store_true", default=False)
+    parser.add_argument("--test", action="store_true", default=False)
     parser.add_argument("--load-checkpoint", type=str, default=None)
+    parser.add_argument("--load-checkpoint-best", action="store_true", default=False)
     parser.add_argument("--batch", type=int, default=64,
                         help="batch size to use for training")
     parser.add_argument("--epochs", type=int, default=10,
@@ -84,7 +86,7 @@ def get_args():
                         help="if specified, combinatorial optimization methods " 
                              "are used for target setting")
     parser.add_argument("--comb-opt-method", type=str, default="local_search",
-                        choices=("local_search", "genetic", "rand_grad"))
+                        choices=("local_search", "rand_grad"))
     parser.add_argument("--target-momentum", action="store_true", default=False,
                         help="if specified, target momentum is used. "
                              "Note: only supported with gradient-based targetprop")
@@ -106,6 +108,7 @@ def get_args():
     parser.add_argument("--perturb-type", type=str, default="random",
                         choices=("random", "grad_guided"))
     parser.add_argument("--perturb-sizes", type=int, default=None, nargs="+")
+    pasrser.add_argument("--grad-guide-offset", type=float, default=3/5)
     parser.add_argument("--candidate-type", type=str, default="random",
                         choices=("random", "grad", "grad_sampled"))
     parser.add_argument("--candidate-grad-delay", type=int, default=1)
@@ -176,8 +179,9 @@ def get_args():
 
 def main(args):
     if args.dataset == "graphs":
-        train_loader, val_loader = get_graphs(
-            6, batch_size=args.batch, num_workers=args.nworkers)
+        train_loader, val_loader, test_loader = get_graphs(
+            6, batch_size=args.batch, num_workers=args.nworkers, 
+            val_set=not args.no_val)
         num_classes = 2
     else:
         train_loader, val_loader, test_loader, num_classes = \
@@ -260,7 +264,9 @@ def main(args):
     if args.load_checkpoint is not None:
         print("Loading from checkpoint", args.load_checkpoint + "...")
         checkpoint_state = load_checkpoint(
-            os.path.join(os.path.join(os.curdir, "logs"), args.load_checkpoint))
+            os.path.join(os.path.join(os.curdir, "logs"), args.load_checkpoint),
+            best_eval=args.load_checkpoint_best)
+        last_step = len(checkpoint_state["training_metrics"])-1
         model_state = checkpoint_state["model_state"]
         network.load_state_dict(model_state)
     if not args.no_train:
@@ -286,10 +292,8 @@ def main(args):
                     searches=args.searches, search_type=args.search_type, 
                     perturb_type=args.perturb_type, candidate_type=args.candidate_type, 
                     candidate_grad_delay=args.candidate_grad_delay, 
-                    splice_conv_targets=args.splice_conv_targets)
-            elif args.comb_opt_method == "genetic":
-                raise NotImplementedError(
-                    "Pure genetic algorithm not currently implemented.")
+                    splice_conv_targets=args.splice_conv_targets, 
+                    grad_guide_offset=args.grad_guide_offset)
             elif args.comb_opt_method == "rand_grad":
                 target_optimizer = partial(
                     RandomGradOptimizer, batch_size=args.batch, 
@@ -302,13 +306,21 @@ def main(args):
 
         with torch.cuda.device(args.device):
             try:
-                train(network, train_loader, val_loader, criterion, optimizer, 
-                      args.epochs, num_classes, target_optimizer=target_optimizer, 
-                      log_dir=log_dir, logger=tb_logger, use_gpu=args.cuda, args=args)
+                last_step = train(network, train_loader, val_loader, criterion, optimizer, 
+                    args.epochs, num_classes, target_optimizer=target_optimizer, 
+                    log_dir=log_dir, logger=tb_logger, use_gpu=args.cuda, args=args)
             except KeyboardInterrupt:
                 print("\nTraining interrupted!\n")
             else:
                 print("\nFinished training.\n")
+
+    if args.test:
+        print("Testing model...")
+        test_metrics = Metrics({"dataset_batches": len(test_loader), 
+                                "loss": [], "accuracy": [], "accuracy_top5": []})
+        with torch.no_grad():
+            evaluate(network, test_loader, criterion, test_metrics, 
+                     tb_logger, last_step, log=True, use_gpu=args.cuda)
 
     if args.ampl_eval:
         ampl_data_dir = args.ampl_eval_dir or log_dir
@@ -369,6 +381,9 @@ def multiclass_hinge_loss(input_, target, size_average=True, reduce_=True):
 
 
 class Metrics(dict):
+
+    def __len__(self):
+        return len(self[list(self.keys())[0]])
 
     def __getitem__(self, key):
         if isinstance(key, int):
@@ -440,7 +455,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
     for epoch in range(epochs):
         for scheduler in lr_schedulers:
             scheduler.step()
-        if epoch == 0:
+        if epoch == 0 and eval_dataset_loader is not None:
             with torch.no_grad():
                 evaluate(model, eval_dataset_loader, loss_function, 
                          eval_metrics, logger, 0, log=True, use_gpu=use_gpu)
@@ -467,12 +482,14 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                                       i, step, last_time)
             train_step(model, modules, inputs, labels, loss_function, optimizer, 
                        target_optimizer, args, step, train_per_layer, log_dir)
-        with torch.no_grad():
-            evaluate(model, eval_dataset_loader, loss_function, 
-                     eval_metrics, logger, step, log=True, use_gpu=use_gpu)
+        if eval_dataset_loader is not None:
+            with torch.no_grad():
+                evaluate(model, eval_dataset_loader, loss_function, 
+                         eval_metrics, logger, step, log=True, use_gpu=use_gpu)
         if args.store_checkpoints:
             store_checkpoint(model, optimizers if train_per_layer else optimizer, 
                              args, training_metrics, eval_metrics, epoch, log_dir)
+    return step
 
 
 def perturb_scheduler(train_step, module_index, iteration, perturb_sizes=[1000]):
@@ -739,16 +756,24 @@ def store_checkpoint(model, optimizers, terminal_args, training_metrics,
             os.remove(previous)
 
 
-def load_checkpoint(log_dir, epoch=None):
-    if epoch is None:
-        checkpoint_files = [file_name for file_name in os.listdir(log_dir)
-                            if file_name.startswith("checkpoint")]
+def load_checkpoint(log_dir, epoch=None, best_eval=False):
+    checkpoint_files = [file_name for file_name in os.listdir(log_dir)
+                        if file_name.startswith("checkpoint")]
+    if epoch is None and best:
+        checkpoint_states = [torch.load(os.path.join(log_dir, file_name)) 
+                             for file_name in checkpoint_files]
+        best_index, best_accuracy = 0, 0
+        for i, state in enumerate(checkpoint_states):
+            eval_accuracy = state["eval_metrics"][-1]["accuracy"]
+            if eval_accuracy > best_accuracy:
+                best_accuracy = eval_accuracy
+                best_index = i
+        checkpoint_files = [checkpoint_files[i]]
+    elif epoch is None:
         checkpoint_files.sort(key=lambda string: int(string[16:-6]))
     else:
-        checkpoint_files = [
-            file_name for file_name in os.listdir(log_dir)
-            if file_name.startswith("checkpoint_epoch{}".format(epoch))
-        ]
+        checkpoint_files = [file_name for file_name in checkpoint_files
+                            if "epoch{}".format(epoch) in file_name]
 
     checkpoint_state = torch.load(os.path.join(log_dir, checkpoint_files[-1]))
     return checkpoint_state

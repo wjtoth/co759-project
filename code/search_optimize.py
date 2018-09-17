@@ -236,22 +236,28 @@ def splice_flat(tensor, region_indices):
 
 
 def splice_conv(regions, splicing_info):
-    # Assumes regions is a 3D tensor of the shape output from torch.nn.Unfold
-    spliced_tensor = fold(regions, splicing_info["kernel_size"], 
-        stride=splicing_info["stride"], padding=splicing_info["kernel_size"])
-    return spliced_tensor / (splicing_info["kernel_size"]**2)  # fix summing in fold
+    # Assumes regions is a 3D or 4D tensor of the shape output from torch.nn.Unfold
+    orig_regions = regions
+    if regions.dim() == 4:
+        regions = regions.view(regions.shape[0]*regions.shape[1], *regions.shape[2:])
+    spliced_tensor = fold(regions, splicing_info["height"],
+        splicing_info["kernel_size"], stride=splicing_info["stride"], 
+        padding=0)#splicing_info["kernel_size"])
+    spliced_tensor = spliced_tensor / (splicing_info["kernel_size"]**2)  # fix summing in fold
+    if orig_regions.dim() == 4:
+        spliced_tensor = spliced_tensor.view(
+            orig_regions.shape[0], orig_regions.shape[1], *spliced_tensor.shape[1:])
+    return spliced_tensor
 
 
 def inverse_receptive_fields(input_, output, per_dim_count, 
                              layer_info, region_type="wide"):
     # Assumes first batch dimension and splits along third and fourth dimensions
-    orig_input_dim = input_.dim()
-    orig_output_dim = output.dim()
-    if orig_input_dim == 5:
-        orig_input = input_
+    orig_input = input_
+    orig_output = output
+    if orig_input.dim() == 5:
         input_ = input_.view(input_.shape[0]*input_.shape[1], *input_.shape[2:])
-    if orig_output_dim == 5:
-        orig_output = output
+    if orig_output.dim() == 5:
         output = output.view(output.shape[0]*output.shape[1], *output.shape[2:])
     conv_kernel = layer_info["conv"]["kernel_size"]
     padding = layer_info["conv"]["padding"]
@@ -266,18 +272,17 @@ def inverse_receptive_fields(input_, output, per_dim_count,
         output_region_size = max(1, input_region_size - conv_kernel + 1) // pool_size
     else:
         raise ValueError("Unknown region type:", region_type)
-    # print(output.shape[2], output_region_size, per_dim_count)
     step_size = (output.shape[2] - output_region_size) // (per_dim_count - 1)
-    # print(step_size)
     output_regions = unfold(output, output_region_size, stride=step_size)
     field_info = {
-        "input": {"kernel_size": input_region_size, "stride": input_region_size},
+        "input": {"height": input_.shape[2], "kernel_size": input_region_size, 
+                  "stride": input_region_size},
         "output": {"kernel_size": output_region_size, "stride": step_size}
     }
-    if orig_input_dim == 5:
+    if orig_input.dim() == 5:
         input_regions = input_regions.view(
             orig_input.shape[0], orig_input.shape[1], *input_regions.shape[1:])
-    if orig_output_dim == 5:
+    if orig_output.dim() == 5:
         output_regions = output_regions.view(
             orig_output.shape[0], orig_output.shape[1], *output_regions.shape[1:])
     return input_regions, output_regions, field_info
@@ -300,7 +305,8 @@ class SearchOptimizer(TargetPropOptimizer):
     def __init__(self, *args, perturb_scheduler=lambda x, y, z: 1000, candidates=64, 
                  iterations=10, searches=1, search_type="beam", 
                  perturb_type="random", candidate_type="random", 
-                 candidate_grad_delay=0, splice_conv_targets=False, **kwargs):
+                 candidate_grad_delay=0, splice_conv_targets=False, 
+                 grad_guide_offset=3/5, **kwargs):
         super().__init__(*args, **kwargs)
         self.perturb_scheduler = perturb_scheduler
         self.candidates = candidates
@@ -308,6 +314,7 @@ class SearchOptimizer(TargetPropOptimizer):
         self.searches = searches
         self.search_type = search_type
         self.perturb_type = perturb_type
+        self.grad_guide_offset = grad_guide_offset
         self.candidate_type = candidate_type
         self.candidate_grad_delay = candidate_grad_delay
         self.splice_conv_targets = splice_conv_targets
@@ -426,7 +433,8 @@ class SearchOptimizer(TargetPropOptimizer):
                 loss_data, candidate_batches, beam_size, module=modules, 
                 splice_conv_targets=splice_conv_targets)
             if self.perturb_type == "grad_guided":
-                sampling_weights = [normalized_diff(loss_grad, candidate) 
+                sampling_weights = [normalized_diff(loss_grad, candidate, 
+                                                    offset=self.grad_guide_offset)
                                     for candidate, _, loss_grad in best_candidates]
                 best_candidates = [(candidate, loss) 
                                    for candidate, loss, _ in best_candidates]
@@ -471,24 +479,29 @@ class SearchOptimizer(TargetPropOptimizer):
                     grad_norm, dim=0, keepdim=True)
                 best_candidates = splice(candidates, top_region_indices)
                 targets.append((best_candidates.squeeze(0), None))
-            elif splice_conv_targets:
-                candidate_regions, loss_regions, field_info = inverse_receptive_fields(
-                    candidates, losses, self.regions, 
-                    {"conv": {"kernel_size": module[0].kernel_size[0], 
-                              "padding": module[0].padding[0]}, 
-                     "max_pool": {"kernel_size": module[1].kernel_size}}, "medium")
-                print(candidate_regions.numel(), loss_regions.numel())
-                top_loss_regions, region_indices = torch.topk(
-                    loss_regions, beam_size, dim=0, largest=False, sorted=True)
-                print(region_indices.numel())
-                del loss_regions
-                best_regions = candidate_regions[region_indices]
-                best_candidates = splice_conv(best_regions, field_info["input"])
-                targets.append((best_candidates.squeeze(0), None))
             else:
+                if losses.dim() > 1:
+                    mean_losses = losses.view(losses.shape[0], int(np.prod(losses.shape[1:])))
+                    mean_losses = mean_losses.mean(dim=1)
+                else:
+                    mean_losses = losses
                 top_losses, candidate_indices = torch.topk(
-                    losses, beam_size, dim=0, largest=False, sorted=True)
-                best_candidates = candidates[candidate_indices]
+                    mean_losses, beam_size, dim=0, largest=False, sorted=True)
+                if splice_conv_targets:
+                    candidate_regions, loss_regions, field_info = inverse_receptive_fields(
+                        candidates, losses, self.regions, 
+                        {"conv": {"kernel_size": module[0].kernel_size[0], 
+                                  "padding": module[0].padding[0]}, 
+                         "max_pool": {"kernel_size": module[1].kernel_size}}, "medium")
+                    loss_regions = loss_regions.mean(2)
+                    loss_regions = torch.stack(
+                        [loss_regions]*candidate_regions.shape[2], dim=2)
+                    top_loss_regions, region_indices = torch.topk(
+                        loss_regions, beam_size, dim=0, largest=False, sorted=True)
+                    best_regions = torch.gather(candidate_regions, 0, region_indices)
+                    best_candidates = splice_conv(best_regions, field_info["input"])
+                else:
+                    best_candidates = candidates[candidate_indices]
                 if self.perturb_type == "grad_guided":
                     top_loss_grads = loss_tuple[1][candidate_indices]
                     targets.append((best_candidates.squeeze(0), 

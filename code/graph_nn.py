@@ -34,26 +34,41 @@ def convert_to_boolean(element):
     return element
 
 
-def get_graphs(size, file_suffix="", batch_size=64, num_workers=0):
-    with open("data/graphs/graphs" + str(size) + file_suffix + ".txt") as graph_file:
-        graph_lines = graph_file.read().splitlines()
+def convert_to_tensor(graph_strings, size):
     num_edges = size * (size-1) // 2
     graphs = [(line.split(" ")[:num_edges], line.split(" ")[num_edges]) 
-              for line in graph_lines]
+              for line in graph_strings]
     graphs = [(torch.FloatTensor([int(value) for value in graph[0]]).unsqueeze(0), 
                torch.LongTensor([convert_to_boolean(graph[1])])) for graph in graphs]
-    random.shuffle(graphs)
-    train_graphs = graphs[:(len(graphs)*9)//10]
-    eval_graphs = graphs[(len(graphs)*9)//10:]
+    return graphs
+
+
+def get_graphs(size, batch_size=64, num_workers=0, val_set=True):
+    with open("data/graphs/graphs" + str(size) + "_train.txt") as graph_file:
+        train_graph_lines = graph_file.read().splitlines()
+    with open("data/graphs/graphs" + str(size) + "_test.txt") as graph_file:
+        test_graph_lines = graph_file.read().splitlines()  
+    train_graphs = convert_to_tensor(train_graph_lines, size)
+    test_graphs = convert_to_tensor(test_graph_lines, size)
+    if val_set:
+        train_graphs = train_graphs[:(len(graphs)*9)//10]
+        eval_graphs = train_graphs[(len(graphs)*9)//10:]
     train_dataset = TensorDataset(torch.cat(list(zip(*train_graphs))[0]), 
                                   torch.cat(list(zip(*train_graphs))[1]))
-    eval_dataset = TensorDataset(torch.cat(list(zip(*eval_graphs))[0]), 
-                                 torch.cat(list(zip(*eval_graphs))[1]))
     train_data_loader = DataLoader(train_dataset, batch_size=batch_size, 
                                    shuffle=True, num_workers=num_workers)
-    eval_data_loader = DataLoader(eval_dataset, batch_size=batch_size, 
-                                  shuffle=True, num_workers=num_workers)
-    return train_data_loader, eval_data_loader
+    test_dataset = TensorDataset(torch.cat(list(zip(*test_graphs))[0]), 
+                                 torch.cat(list(zip(*test_graphs))[1]))
+    test_data_loader = DataLoader(test_dataset, batch_size=batch_size, 
+                                   shuffle=True, num_workers=num_workers)
+    if val_set:
+        eval_dataset = TensorDataset(torch.cat(list(zip(*eval_graphs))[0]), 
+                                     torch.cat(list(zip(*eval_graphs))[1]))
+        eval_data_loader = DataLoader(eval_dataset, batch_size=batch_size, 
+                                      shuffle=True, num_workers=num_workers)
+        return train_data_loader, eval_data_loader, test_data_loader
+    else:
+        return train_data_loader, None, test_data_loader
 
 
 def train_classifier(size, use_gpu=False):
