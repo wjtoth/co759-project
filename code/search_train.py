@@ -42,6 +42,8 @@ def get_args():
                         choices=("convnet4", "convnet8", "toynet"))
     parser.add_argument("--nonlin", type=str, default="relu",
                         choices=("relu", "step01", "step11", "staircase"))
+    parser.add_argument("--hidden-units", type=int, default=100,
+                        help="number of hidden units in the toy network")
 
     # training/optimization arguments
     parser.add_argument("--no-train", action="store_true", default=False)
@@ -54,8 +56,6 @@ def get_args():
                         help="number of epochs to train for")
     parser.add_argument("--test-batch", type=int, default=0,
                         help="batch size to use for validation and testing")
-    parser.add_argument("--loss", type=str, default="cross_entropy",
-                        choices=("cross_entropy", "hinge"))
     parser.add_argument("--wtdecay", type=float, default=0)
     parser.add_argument("--lr-decay-factor", type=float, default=1.0,
                         help="factor by which to multiply the learning rate " 
@@ -87,12 +87,6 @@ def get_args():
                              "are used for target setting")
     parser.add_argument("--comb-opt-method", type=str, default="local_search",
                         choices=("local_search", "rand_grad"))
-    parser.add_argument("--target-momentum", action="store_true", default=False,
-                        help="if specified, target momentum is used. "
-                             "Note: only supported with gradient-based targetprop")
-    parser.add_argument("--target-momentum-factor", type=float, default=0.0,
-                        help="factor by which to multiply the momentum tensor "
-                             "during target setting")
     parser.add_argument("--no-loss-grad-weight", action="store_true", default=False)
 
     # combinatorial search arguments
@@ -178,6 +172,7 @@ def get_args():
 
 
 def main(args):
+    # Get datasets
     if args.dataset == "graphs":
         train_loader, val_loader, test_loader = get_graphs(
             6, batch_size=args.batch, num_workers=args.nworkers, 
@@ -191,19 +186,16 @@ def main(args):
     if args.adv_eval:
         adversarial_eval_dataset = get_adversarial_dataset(args)
 
+    # Create activation function
     args.nonlin = args.nonlin.lower()
     if args.nonlin == "relu":
         nonlin = nn.ReLU
     elif args.nonlin == "step01":
         nonlin = partial(Step, make01=True, targetprop_rule=args.grad_tp_rule, 
-                         use_momentum=args.target_momentum, 
-                         momentum_factor=args.target_momentum_factor,
                          scale_by_grad_out=not args.no_loss_grad_weight,
                          tanh_factor=args.softhinge_factor)
     elif args.nonlin == "step11":
         nonlin = partial(Step, make01=False, targetprop_rule=args.grad_tp_rule,
-                         use_momentum=args.target_momentum, 
-                         momentum_factor=args.target_momentum_factor, 
                          scale_by_grad_out=not args.no_loss_grad_weight,
                          tanh_factor=args.softhinge_factor)
     elif args.nonlin == "staircase":
@@ -242,10 +234,9 @@ def main(args):
             raise NotImplementedError(
                 "Toy network can only be trained on CIFAR10, "
                 "MNIST, or graph connectivity task.")
-        network = ToyNet(nonlin=nonlin, input_shape=input_shape,
-                         separate_activations=args.comb_opt, 
-                         num_classes=num_classes, 
-                         multi_gpu_modules=args.multi_gpu)
+        network = ToyNet(nonlin=nonlin, input_shape=input_shape, 
+            hidden_units=args.hidden_units, num_classes=num_classes, 
+            separate_activations=args.comb_opt, multi_gpu_modules=args.multi_gpu)
     network.needs_backward_twice = False
     if args.nonlin.startswith("step") or args.nonlin == "staircase":
         network.targetprop_rule = args.grad_tp_rule
@@ -271,11 +262,8 @@ def main(args):
         network.load_state_dict(model_state)
     if not args.no_train:
         print("Creating loss function...")
-        if args.loss == "cross_entropy":
-            criterion = torch.nn.CrossEntropyLoss(
-                size_average=not args.comb_opt, reduce=not args.comb_opt)
-        elif args.loss == "hinge":
-            criterion = partial(multiclass_hinge_loss, reduce_=not args.comb_opt)
+        criterion = torch.nn.CrossEntropyLoss(
+            size_average=not args.comb_opt, reduce=not args.comb_opt)
         print("Creating parameter optimizer...")
         optimizer = partial(optim.Adam, lr=0.00025, weight_decay=args.wtdecay)
         if args.comb_opt:
@@ -304,6 +292,7 @@ def main(args):
         else:
             target_optimizer = None
 
+        # Train model
         with torch.cuda.device(args.device):
             try:
                 last_step = train(network, train_loader, val_loader, criterion, optimizer, 
@@ -323,6 +312,8 @@ def main(args):
                      tb_logger, last_step, log=True, use_gpu=args.cuda)
 
     if args.ampl_eval:
+        print("Running BARON evaluation...")
+        print("Computing optimal targets at selected timesteps...")
         ampl_data_dir = args.ampl_eval_dir or log_dir
         for time_step in args.collect_timesteps:
             optimal_target_data = compute_optimal_targets(
@@ -352,34 +343,6 @@ def main(args):
         upload(log_dir, token=args.dbx_token)
 
 
-def convert_to_1hot(target, noutputs, make_11=True):
-    if target.is_cuda:
-        target_1hot = torch.cuda.CharTensor(target.shape[0], noutputs)
-    else:
-        target_1hot = torch.CharTensor(target.shape[0], noutputs)
-    target_1hot.zero_()
-    target_1hot.scatter_(1, target.unsqueeze(1), 1)
-    target_1hot = target_1hot.type(target.type())
-    if make_11:
-        target_1hot = target_1hot * 2 - 1
-    return target_1hot
-
-
-def multiclass_hinge_loss(input_, target, size_average=True, reduce_=True):
-    """Compute hinge loss: max(0, 1 - input * target)"""
-    target_1hot = convert_to_1hot(target.data, input_.shape[1], make_11=True).float()
-    if type(input_) is Variable:
-        target_1hot = Variable(target_1hot)
-    # max(0, 1-z*t)
-    loss = (-target_1hot * input_.float() + 1.0).clamp(min=0).sum(dim=1)
-    if reduce_:
-        if size_average:
-            loss = loss.mean(dim=0)
-        else:
-            loss = loss.sum(dim=0)
-    return loss
-
-
 class Metrics(dict):
 
     def __len__(self):
@@ -396,19 +359,6 @@ class Metrics(dict):
     def append(self, metric_tuple):
         for metric, value in metric_tuple:
             self[metric].append(value)
-
-
-def print_param_info(module, layer):
-    for k, param in enumerate(module.parameters()):
-        if k == 0:
-            print("\nlayer {0} - weight matrices mean and variance: "
-                  "{1:.8f}, {2:.8f}\n".format(
-                  layer, torch.mean(param.data), 
-                  torch.std(param.data)))
-            print("layer {0} - gradient mean and variance: "
-                  "{1:.8f}, {2:.8f}\n".format(
-                  layer, torch.mean(param.grad.data), 
-                  torch.std(param.grad.data)))
 
 
 def train(model, train_dataset_loader, eval_dataset_loader, loss_function, 
@@ -434,13 +384,6 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
         optimizer = optimizer(model.parameters())
         lr_schedulers = [optim.lr_scheduler.MultiStepLR(
             optimizer, args.lr_decay_epochs, gamma=args.lr_decay_factor)]
-        if args.target_momentum:
-            activations = list(chain.from_iterable(
-                [[child for i, child in enumerate(module) if i == len(module)-1] 
-                 for module in model.all_modules[:-1]]))
-            for i, activation in enumerate(activations):
-                activation.initialize_momentum_state(
-                    [batch_size] + model.input_sizes[i+1], num_classes)
     print("Optimizers created.")
     extra_args = target_optimizer.__dict__.copy() if args.comb_opt else None
     if extra_args is not None and "perturb_base_tensors" in extra_args:
@@ -564,9 +507,6 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
             parse_step_data(model, output_targets[i], i, step, 
                             os.path.join(log_dir, "run_data"), target_loss[i].item())
     if not train_per_layer:
-        if args.target_momentum:
-            for activation in activations:
-                activation.batch_labels = targets
         optimizer.zero_grad()
         outputs = model(inputs)
         loss = loss_function(outputs, targets)

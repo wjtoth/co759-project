@@ -20,8 +20,7 @@ class StepF(Function):
     """
 
     def __init__(self, targetprop_rule=tp.TPRule.WtHinge, make01=False, 
-                 scale_by_grad_out=False, tanh_factor=1.0, use_momentum=False, 
-                 momentum_factor=0, momentum_state=None, batch_labels=None):
+                 scale_by_grad_out=False, tanh_factor=1.0):
         super().__init__()
         self.tp_rule = targetprop_rule
         self.make01 = make01
@@ -29,10 +28,6 @@ class StepF(Function):
         self.target = None
         self.saved_grad_out = None
         self.tanh_factor = tanh_factor
-        self.use_momentum = use_momentum
-        self.momentum_factor = momentum_factor
-        self.momentum_state = momentum_state
-        self.batch_labels = batch_labels
 
     def forward(self, input_):
         self.save_for_backward(input_)
@@ -51,17 +46,7 @@ class StepF(Function):
             tp_grad_func = tp.TPRule.get_backward_func(self.tp_rule)
             if self.tp_rule.value == 27:
                 tp_grad_func = partial(tp_grad_func, tanh_factor=self.tanh_factor)
-            if self.use_momentum:
-                momentum_tensor = self.momentum_state[
-                    range(self.batch_labels.shape[0]), self.batch_labels]
-                grad_input, self.target = tp_grad_func(
-                    input_, go, None, self.make01, velocity=momentum_tensor.float(), 
-                    momentum_factor=self.momentum_factor, return_target=False)
-                self.momentum_state[range(self.batch_labels.shape[0]), 
-                                    self.batch_labels] = self.target.long()
-            else:
-                grad_input, self.target = tp_grad_func(
-                    input_, go, self.target, self.make01)
+            grad_input, self.target = tp_grad_func(input_, go, self.target, self.make01)
             if self.scale_by_grad_out:
                 # remove batch-size scaling
                 grad_input = grad_input * go.shape[0] * go.abs()  
@@ -70,26 +55,13 @@ class StepF(Function):
 
 class Step(nn.Module):
     def __init__(self, targetprop_rule=tp.TPRule.TruncWtHinge, make01=False, 
-                 scale_by_grad_out=False, tanh_factor=1.0, use_momentum=False, 
-                 momentum_factor=0):
+                 scale_by_grad_out=False, tanh_factor=1.0):
         super().__init__()
         self.tp_rule = targetprop_rule
         self.make01 = make01
         self.scale_by_grad_out = scale_by_grad_out
         self.tanh_factor = tanh_factor
         self.output_hook = None
-        self.use_momentum = use_momentum
-        self.momentum_factor = momentum_factor
-        self.momentum_state = None
-        self.batch_labels = None
-        if use_momentum:
-            self.function = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
-                                  scale_by_grad_out=self.scale_by_grad_out, 
-                                  tanh_factor=self.tanh_factor,
-                                  use_momentum=self.use_momentum, 
-                                  momentum_factor=self.momentum_factor, 
-                                  momentum_state=self.momentum_state,
-                                  batch_labels=self.batch_labels)
 
     def __repr__(self):
         s = "{name}(a={a}, b={b}, tp={tp})"
@@ -99,27 +71,11 @@ class Step(nn.Module):
     def register_output_hook(self, output_hook):
         self.output_hook = output_hook
 
-    def initialize_momentum_state(self, target_shape, num_classes):
-        self.momentum_state = torch.zeros(
-            target_shape[0], num_classes, *target_shape[1:]).type(torch.LongTensor)
-        self.momentum_state = self.momentum_state.cuda()
-        if self.use_momentum:
-            self.function.momentum_state = self.momentum_state
-
     def forward(self, x):
         function = StepF(targetprop_rule=self.tp_rule, make01=self.make01, 
                          scale_by_grad_out=self.scale_by_grad_out, 
-                         tanh_factor=self.tanh_factor,
-                         use_momentum=self.use_momentum, 
-                         momentum_factor=self.momentum_factor, 
-                         batch_labels=self.batch_labels)
-        if self.use_momentum:
-            self.momentum_state = self.function.momentum_state
-            self.function = function
-            self.function.momentum_state = self.momentum_state
-            y = self.function(x)
-        else:
-            y = function(x)
+                         tanh_factor=self.tanh_factor)
+        y = function(x)
         if self.output_hook:
             # detach the output from the input to the next layer, 
             # so we can perform target propagation
@@ -132,11 +88,11 @@ class Step(nn.Module):
 
 class ToyNet(nn.Module):
 
-    def __init__(self, nonlin=nn.ReLU, input_shape=(784,), 
-                 separate_activations=True, num_classes=10, multi_gpu_modules=False):
+    def __init__(self, nonlin=nn.ReLU, input_shape=(784,), hidden_units=100,
+                 num_classes=10, separate_activations=True, multi_gpu_modules=False):
         super().__init__()
         self.input_size = input_shape[0]
-        self.fc1_size = 100
+        self.fc1_size = hidden_units
         self.separate_activations = separate_activations
 
         self.input_sizes = [list(input_shape), [self.fc1_size]]
