@@ -1,5 +1,0 @@
-\section{Discrete Optimization Heuristics}\label{heuristics}
-\paragraph{}
-We propose to further study the combinatorial aspect of the mixed convex-combinatorial training problem. We would experiment with different discrete optimization heuristics for setting loss-minimizing targets. The author's propose the Beam Search heuristic (hill climbing on a set of solutions) for setting targets, which they do not end up carrying through with in their actual experiment, so we could also investigate this one as well, and perhaps why they chose not to carry on using this heuristic. Some other heuristics that we would look into include simulated annealing, and genetic algorithms. Time-permitting, we want to explore more sophisticated discrete optimization algorithms for this problem such as attempting a (mixed) integer programming formulation and applying cutting planes.
-
-An alternative line of inquiry could explore other ways of dealing with infeasible datasets, besides loss-minimization. For example, training on a maximum subset of data points having a feasible set of targets, or minimally adapting the network to attain feasibility.
