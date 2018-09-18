@@ -786,7 +786,7 @@ def parse_step_data(model, label, target_index, train_step, log_dir=None,
         data_file_name = os.path.join(log_dir, "data_step" + str(train_step) + ".txt")
         with open(data_file_name, "w+") as data_file:
             print(data_string, file=data_file)
-        with open(data_file_name.replace("data", "loss"), "w+") as loss_file:
+        with open(data_file_name.replace("data_step", "loss_step"), "w+") as loss_file:
             print(target_loss, file=loss_file)
 
     return data_string
