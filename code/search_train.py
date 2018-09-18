@@ -102,7 +102,7 @@ def get_args():
     parser.add_argument("--perturb-type", type=str, default="random",
                         choices=("random", "grad_guided"))
     parser.add_argument("--perturb-sizes", type=int, default=None, nargs="+")
-    pasrser.add_argument("--grad-guide-offset", type=float, default=3/5)
+    parser.add_argument("--grad-guide-offset", type=float, default=3/5)
     parser.add_argument("--candidate-type", type=str, default="random",
                         choices=("random", "grad", "grad_sampled"))
     parser.add_argument("--candidate-grad-delay", type=int, default=1)
