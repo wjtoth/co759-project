@@ -1,0 +1,18 @@
+param BatchSize;
+set ELEMENTS = 1..BatchSize;
+param E in ELEMENTS;
+
+param M;
+param N;
+param T{ELEMENTS, i in 1..N};
+param W{j in 1..M, i in 1..N};
+
+var target{ELEMENTS, j in 1..M} binary;
+
+minimize Loss:
+	-1*(sum{i in 1..N}T[E,i]*(sum{j in 1..M}(2*target[E,j]-1)*W[j,i])-log(sum{i in 1..N}exp(sum{j in 1..M}(2*target[E,j]-1)*W[j,i]))) ;
+	
+
+
+
+	
