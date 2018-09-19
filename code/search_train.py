@@ -253,7 +253,8 @@ def main(args):
         network = nn.DataParallel(network)
 
     print("Setting up logging...")
-    log_dir = os.path.join(os.path.join(os.curdir, "logs"), str(round(time())))
+    log_dir = os.path.join(os.path.join(os.curdir, "logs"), 
+        str(round(time())) if not args.load_checkpoint else args.load_checkpoint)
     tb_logger = TensorBoardLogger(log_dir) if args.tb_logging else None
 
     if args.load_checkpoint is not None:
@@ -318,15 +319,17 @@ def main(args):
     if args.ampl_eval:
         print("Running BARON evaluation...")
         print("Computing optimal targets at selected timesteps...")
-        ampl_data_dir = args.ampl_eval_dir or log_dir
+        ampl_data_dir = args.ampl_eval_dir or os.path.join(log_dir, "run_data")
         for time_step in args.collect_timesteps:
             optimal_target_data = compute_optimal_targets(
                 time_step, data_dir=ampl_data_dir, baron_options=args.baron_options)
-            optimal_target_data = store_target_data(optimal_target_data, ampl_data_dir)
-            print("\nStep", time_step, "optimal target loss mean:", 
-                  optimal_target_data["loss_mean"])
-            print("Step", time_step, "optimal target loss standard error:", 
-                  optimal_target_data["loss_std_error"])
+            if optimal_target_data is not None:
+                optimal_target_data = store_target_data(
+                    optimal_target_data, ampl_data_dir)
+                print("\nStep", time_step, "optimal target loss mean:", 
+                      optimal_target_data["loss_mean"])
+                print("Step", time_step, "optimal target loss standard error:", 
+                      optimal_target_data["loss_std_error"])
 
     if args.adv_eval:
         print("\nEvaluating on adversarial examples...")
@@ -350,7 +353,11 @@ def main(args):
 class Metrics(dict):
 
     def __len__(self):
-        return len(self[list(self.keys())[0]])
+        try:
+            length = len(self[list(self.keys())[0]])
+        except TypeError:
+            length = len(self[list(self.keys())[-1]])
+        return length
 
     def __getitem__(self, key):
         if isinstance(key, int):
@@ -435,7 +442,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                          eval_metrics, logger, step, log=True, use_gpu=use_gpu)
         if args.store_checkpoints or args.store_many_checkpoints:
             store_checkpoint(model, optimizers if train_per_layer else optimizer, 
-                             args, training_metrics, eval_metrics, epoch, log_dir, 
+                             args, training_metrics, eval_metrics, epoch+1, log_dir, 
                              not args.store_many_checkpoints)
     return step
 
@@ -713,7 +720,7 @@ def store_checkpoint(model, optimizers, terminal_args, training_metrics,
 def load_checkpoint(log_dir, epoch=None, best_eval=False):
     checkpoint_files = [file_name for file_name in os.listdir(log_dir)
                         if file_name.startswith("checkpoint")]
-    if epoch is None and best:
+    if epoch is None and best_eval:
         checkpoint_states = [torch.load(os.path.join(log_dir, file_name)) 
                              for file_name in checkpoint_files]
         best_index, best_accuracy = 0, 0
@@ -801,15 +808,20 @@ def compute_optimal_targets(train_step, data_dir=None, data_strings=None,
     if target_index is not None:
         data_file_path = os.path.join(
             data_dir, "data" + str(target_index) + "_step" + str(train_step))
-        data_files_paths = data_file_path
+        data_file_paths = data_file_path
     else:
-        data_files_paths = utils.file_findall(
+        data_file_names = utils.file_findall(
             data_dir, r"data\d+_step" + str(train_step) + r"\.txt")
-    optimal_target_data = run_neos_job(
-        model_file_path, data_file_paths, display_variable_data=True, 
-        baron_options=baron_options)
-    optimal_target_data["step"] = train_step
-    return optimal_target_data
+        data_file_paths = [os.path.join(data_dir, file_name) 
+                           for file_name in data_file_names]
+    if not data_file_paths:
+        print("No AMPL data found for step", train_step)
+    else:
+        optimal_target_data = run_neos_job(
+            model_file_path, data_file_paths, display_variable_data=True, 
+            baron_options=baron_options)
+        optimal_target_data["step"] = train_step
+        return optimal_target_data
 
 
 def store_target_data(target_data, data_dir):
