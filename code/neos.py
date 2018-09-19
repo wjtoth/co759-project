@@ -153,18 +153,16 @@ def process_job(job_string, server="https://neos-server.org:3333",
             sys.stderr.write("NEOS Server error: %s\n" % password)
             sys.exit(1)
         else:
-            output = ""
+            output, offset, status = "", 0, ""
+            while status != "Done":
+                status = neos.getJobStatus(job_number, password)
+                time.sleep(1)
             if not log_only_results:
-                offset = 0
-                status = ""
-                while status != "Done":
-                    time.sleep(0.5)
-                    (msg, offset) = neos.getIntermediateResults(job_number, password, offset)
-                    msg = msg.data.decode()
-                    output += msg
-                    if log_output:
-                        sys.stdout.write(msg)
-                    status = neos.getJobStatus(job_number, password)
+                (msg, offset) = neos.getIntermediateResults(job_number, password, offset)
+                msg = msg.data.decode()
+                output += msg
+                if log_output:
+                    sys.stdout.write(msg)
             msg = neos.getFinalResults(job_number, password).data.decode()
             output += msg
             if log_output:

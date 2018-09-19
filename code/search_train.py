@@ -841,7 +841,10 @@ def store_target_data(target_data, data_dir):
 
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method("spawn")
+    try:
+        multiprocessing.set_start_method("spawn")
+    except RuntimeError:
+        pass
     args = get_args()
     for i in range(args.runs):
         print("\nStarting experiment " + str(i+1) + "...\n")
