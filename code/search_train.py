@@ -403,9 +403,12 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
     training_metrics = Metrics({"dataset_batches": len(train_dataset_loader),
                                 "loss": [], "accuracy": [], 
                                 "accuracy_top5": [], "steps/sec": []})
-    eval_metrics = Metrics({"dataset_batches": len(eval_dataset_loader), 
-                            "loss": [], "accuracy": [], "accuracy_top5": []})
-    print("Beginning training...")
+    if eval_dataset_loader is not None:
+        eval_metrics = Metrics({"dataset_batches": len(eval_dataset_loader), 
+                                "loss": [], "accuracy": [], "accuracy_top5": []})
+    else:
+        eval_metrics = None
+    print("\nBeginning training...\n")
     for epoch in range(epochs):
         for scheduler in lr_schedulers:
             scheduler.step()
@@ -682,9 +685,8 @@ def store_run_info(terminal_args, log_dir, extra_args=None):
 
 def store_checkpoint(model, optimizers, terminal_args, training_metrics, 
                      eval_metrics, epoch, log_dir, only_best_last=True):
-    best_index = max(enumerate(eval_metrics["accuracy"]), key=lambda val: val[1])[0]
-    if only_best_last and best_index != epoch:
-        return
+    if eval_metrics is not None:
+        best_index = max(enumerate(eval_metrics["accuracy"]), key=lambda val: val[1])[0]
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     optimizer_states = ([optimizer.state_dict() for optimizer in optimizers]
@@ -704,17 +706,20 @@ def store_checkpoint(model, optimizers, terminal_args, training_metrics,
     print("\nModel checkpoint saved at: " 
           + "\\".join(file_path.split("\\")[-2:]) + "\n")
     # delete old checkpoint
-    removed_epoch = None
-    if only_best_last and best_index == epoch and epoch != 0:
-        removed_epoch = max(enumerate(eval_metrics["accuracy"][:-1]), 
-                            key=lambda val: val[1])[0]
-    elif epoch > 9 and epoch % 10 != 0:
-        removed_epoch = epoch-10
-    if removed_epoch is not None:
-        previous = os.path.join(
-            log_dir, "checkpoint_epoch{}.state".format(removed_epoch))
-        if os.path.exists(previous) and os.path.isfile(previous):
-            os.remove(previous)
+    removed_epochs = []
+    if (only_best_last and eval_metrics is not None 
+            and best_index == epoch and epoch != 0):
+        removed_epochs.append(max(enumerate(eval_metrics["accuracy"][:-1]), 
+                                  key=lambda val: val[1])[0])
+    elif only_best_last and epoch-1 not in removed_epochs:
+        removed_epochs.append(epoch-1)
+    elif not only_best_last and epoch > 9 and epoch % 10 != 0:
+        removed_epochs.append(epoch-10)
+    if removed_epochs:
+        for epoch in removed_epochs:
+            previous = os.path.join(log_dir, "checkpoint_epoch{}.state".format(epoch))
+            if os.path.exists(previous) and os.path.isfile(previous):
+                os.remove(previous)
 
 
 def load_checkpoint(log_dir, epoch=None, best_eval=False):
