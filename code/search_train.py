@@ -68,7 +68,7 @@ def get_args():
                              "at various training steps for AMPL optimization; "
                              "currently only available for ToyNet model.")
     parser.add_argument("--collect-timesteps", type=int, nargs="+", 
-                        default=[0, 10, 100, 1000, 10000, 50000])
+                        default=[10, 30, 100, 300, 1000, 3000, 10000, 30000])
     parser.add_argument("--collect-count", type=int, default=1,
                         help="if collect_params, collect data of this many targets")
     parser.add_argument("--ampl-train", action="store_true", default=False)
@@ -815,7 +815,7 @@ def compute_optimal_targets(train_step, data_dir=None, data_strings=None,
         data_file_paths = [os.path.join(data_dir, file_name) 
                            for file_name in data_file_names]
     if not data_file_paths:
-        print("No AMPL data found for step", train_step)
+        print("\nNo AMPL data found for step", train_step)
     else:
         optimal_target_data = run_neos_job(
             model_file_path, data_file_paths, display_variable_data=True, 
