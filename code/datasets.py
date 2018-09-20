@@ -62,9 +62,11 @@ def create_mnist_cifar_datasets(batch_size, use_cuda, seed, ds=None, mean_std=No
                                 download=False, test_batch_size=None, do_aug=False, create_val=True,
                                 num_workers=2, dbg_ds_size=0):
     kwargs = {}
-    torch.manual_seed(seed)
+    if seed != -1:
+        torch.manual_seed(seed)
     if use_cuda:
-        torch.cuda.manual_seed(seed)
+        if seed != -1:
+            torch.cuda.manual_seed(seed)
         kwargs = {'num_workers': num_workers, 'pin_memory': True}
 
     if mean_std is None:
@@ -113,9 +115,11 @@ def create_mnist_cifar_datasets(batch_size, use_cuda, seed, ds=None, mean_std=No
 def create_svhn_datasets(batch_size, use_cuda, seed, mean_std=None, val_pct=0.1, data_dir='', download=False,
                          test_batch_size=None, do_aug=False, create_val=True, num_workers=2, dbg_ds_size=0):
     kwargs = {}
-    torch.manual_seed(seed)
+    if seed != -1:
+        torch.manual_seed(seed)
     if use_cuda:
-        torch.cuda.manual_seed(seed)
+        if seed != -1:
+            torch.cuda.manual_seed(seed)
         kwargs = {'num_workers': num_workers, 'pin_memory': True}
 
     if mean_std is None:
@@ -170,9 +174,11 @@ def create_svhn_datasets(batch_size, use_cuda, seed, mean_std=None, val_pct=0.1,
 def create_imagenet_datasets(batch_size, use_cuda, seed, mean_std=None, data_root_dir='', test_batch_size=None,
                              create_val=True, do_aug=True, num_workers=2, dbg_ds_size=0):
     kwargs = {}
-    torch.manual_seed(seed)
+    if seed != -1:
+        torch.manual_seed(seed)
     if use_cuda:
-        torch.cuda.manual_seed(seed)
+        if seed != -1:
+            torch.cuda.manual_seed(seed)
         kwargs = {'num_workers': num_workers, 'pin_memory': True}
 
     assert mean_std is not None, 'cannot compute mean_std on imagenet, must specify it beforehand'
