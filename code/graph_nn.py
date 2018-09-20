@@ -51,8 +51,8 @@ def get_graphs(size, batch_size=64, num_workers=0, val_set=True):
     train_graphs = convert_to_tensor(train_graph_lines, size)
     test_graphs = convert_to_tensor(test_graph_lines, size)
     if val_set:
-        train_graphs = train_graphs[:(len(graphs)*9)//10]
-        eval_graphs = train_graphs[(len(graphs)*9)//10:]
+        train_graphs = train_graphs[:(len(train_graphs)*9)//10]
+        eval_graphs = train_graphs[(len(test_graphs)*9)//10:]
     train_dataset = TensorDataset(torch.cat(list(zip(*train_graphs))[0]), 
                                   torch.cat(list(zip(*train_graphs))[1]))
     train_data_loader = DataLoader(train_dataset, batch_size=batch_size, 
