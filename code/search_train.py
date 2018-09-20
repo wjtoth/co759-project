@@ -845,14 +845,18 @@ def store_target_data(target_data, data_dir):
 
 
 if __name__ == "__main__":
+    args = get_args()
     try:
-        multiprocessing.set_start_method("spawn")
+        if args.runs != 1:
+            multiprocessing.set_start_method("spawn")
     except RuntimeError:
         pass
-    args = get_args()
-    for i in range(args.runs):
-        print("\nStarting experiment " + str(i+1) + "...\n")
-        # Run in separate process to avoid PyTorch multiprocessing errors
-        process = Process(target=main, args=(args,))
-        process.start()
-        process.join()
+    if args.runs == 1:
+        main(args)
+    else:
+        for i in range(args.runs):
+            print("\nStarting experiment " + str(i+1) + "...\n")
+            # Run in separate process to avoid PyTorch multiprocessing errors
+            process = Process(target=main, args=(args,))
+            process.start()
+            process.join()
