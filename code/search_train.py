@@ -330,6 +330,9 @@ def main(args):
                       optimal_target_data["loss_mean"])
                 print("Step", time_step, "optimal target loss standard error:", 
                       optimal_target_data["loss_std_error"])
+                print("Step", time_step, "total time and ampl time:",
+                      optimal_target_data["total_time"], 
+                      optimal_target_data["ampl_time"])
 
     if args.adv_eval:
         print("\nEvaluating on adversarial examples...")
@@ -825,7 +828,8 @@ def compute_optimal_targets(train_step, data_dir=None, data_strings=None,
         optimal_target_data = run_neos_job(
             model_file_path, data_file_paths, display_variable_data=True, 
             baron_options=baron_options)
-        optimal_target_data["step"] = train_step
+        if optimal_target_data is not None:
+            optimal_target_data["step"] = train_step
         return optimal_target_data
 
 

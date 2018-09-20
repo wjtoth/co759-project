@@ -61,14 +61,15 @@ def generate_commands(displayed_variable="target", baron_options=None, batched_d
                 command_string += keyword + "=" + str(value) + " "
             else:
                 command_string += keyword + " "
-        command_string = command_string.rstrip() + "';\n"
+        command_string = command_string.rstrip() + "';"
     if batched_data:
-        command_string += "for {e in ELEMENTS}{\nlet E := e;\nsolve;\n}\n"
+        command_string += "\nfor {e in ELEMENTS}{\nlet E := e;\nsolve;\n}"
     else:
-        command_string += "solve;\n"
+        command_string += "\nsolve;"
     if displayed_variable:
-        command_string += "display {}".format(displayed_variable)
-    return command_string + ";"
+        command_string += "\ndisplay {}".format(displayed_variable) + ";"
+    command_string += "\ndisplay _total_solve_time, _ampl_time;"
+    return command_string 
 
 
 def combine_data_files(data_file_paths, file_name=None):
@@ -153,10 +154,15 @@ def process_job(job_string, server="https://neos-server.org:3333",
             sys.stderr.write("NEOS Server error: %s\n" % password)
             sys.exit(1)
         else:
-            output, offset, status = "", 0, ""
+            output, offset, status, timer = "", 0, "", 0
             while status != "Done":
                 status = neos.getJobStatus(job_number, password)
                 time.sleep(1)
+                timer += 1
+                if timer > 300:
+                    print("NEOS BARON job exceeded time limit:", timer, "seconds")
+                    print("Ending...")
+                    return
             if not log_only_results:
                 (msg, offset) = neos.getIntermediateResults(job_number, password, offset)
                 msg = msg.data.decode()
@@ -198,7 +204,15 @@ def parse_output(job_output_string, batched_data=False):
         else:
             target = None
         losses, targets = [loss], [target] if target is not None else None
-    return {"losses": losses, "targets": targets}
+    total_time, ampl_time = None, None
+    if "_total_solve_time" in job_output_string:
+        total_time = float(re.search(
+            r"_total_solve_time = (\d{1,3}.\d+)", job_output_string)[1])
+    if "_ampl_time" in job_output_string:
+        ampl_time = float(re.search(
+            r"_ampl_time = (\d{1,3}.\d+)", job_output_string)[1])
+    return {"losses": losses, "targets": targets, 
+            "total_time": total_time, "ampl_time": ampl_time}
 
 
 def run_neos_job(model_file_path, data_file_paths, display_variable_data=False, 
@@ -214,7 +228,11 @@ def run_neos_job(model_file_path, data_file_paths, display_variable_data=False,
         commands = generate_commands(None, baron_options, batched_data)
     job_string = generate_job(model_file_path, data_file_path, commands)
     output = process_job(job_string, log_output=log_output)
-    return parse_output(output, batched_data)
+    if output is not None:
+        output_data = parse_output(output, batched_data)
+    else:
+        output_data = None
+    return output_data
 
 
 if __name__ == '__main__':
@@ -222,6 +240,6 @@ if __name__ == '__main__':
     args = parse_args()
     results = run_neos_job(args.model_file, args.data_file, 
                            display_variable_data=True, log_output=True,
-                           baron_options=None, batched_data=True)
+                           baron_options=None, batched_data=False)
     print(results)
     print(time.time() - start_time)
