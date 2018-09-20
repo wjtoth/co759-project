@@ -714,9 +714,9 @@ def store_checkpoint(model, optimizers, terminal_args, training_metrics,
             and best_index == epoch and epoch != 0):
         removed_epochs.append(max(enumerate(eval_metrics["accuracy"][:-1]), 
                                   key=lambda val: val[1])[0])
-    elif only_best_last and epoch-1 not in removed_epochs:
+    if only_best_last and epoch-1 != best_index and epoch-1 not in removed_epochs:
         removed_epochs.append(epoch-1)
-    elif not only_best_last and epoch > 9 and epoch % 10 != 0:
+    if not only_best_last and epoch > 9 and epoch % 10 != 0:
         removed_epochs.append(epoch-10)
     if removed_epochs:
         for epoch in removed_epochs:
