@@ -3,6 +3,7 @@ import time
 import datetime
 
 from dropbox import dropbox
+from dropbox.exceptions import ApiError
 
 
 DBX_PATH = ("/College Files/Grad School/Discrete Optimization "
@@ -25,8 +26,12 @@ def upload(path, dbx_path=None, token=None, dbx=None, overwrite=False):
         if path.startswith("." + os.path.sep):
             path = os.path.sep.join(path.split(os.path.sep)[1:])
         path = os.path.join(dbx_path, path).replace(os.path.sep, "/")
-        dbx.files_upload(data, path, mode, 
-            client_modified=datetime.datetime(*time.gmtime(modified_time)[:6]))
+        try:
+            dbx.files_upload(data, path, mode, 
+                client_modified=datetime.datetime(*time.gmtime(modified_time)[:6]))
+        except ApiError as e:
+            if not e.error.get_path().reason.is_conflict():
+                raise e
     else:
         for dir_path, dir_names, file_names in os.walk(path):
             for file_name in file_names:
