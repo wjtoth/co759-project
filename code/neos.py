@@ -72,12 +72,17 @@ def generate_commands(displayed_variable="target", baron_options=None, batched_d
     return command_string 
 
 
-def combine_data_files(data_file_paths, file_name=None):
-    data_strings = []
-    for file_path in data_file_paths:
-        with open(file_path) as data_file:
-            data_string = data_file.read()
-        data_strings.append(data_string)
+def combine_data_files(data_file_paths=None, data_strings=None, 
+                       file_name=None, store=True):
+    if data_strings is None:
+        data_strings = []
+        for file_path in data_file_paths:
+            with open(file_path) as data_file:
+                data_string = data_file.read()
+            data_strings.append(data_string)
+        batch_size = len(data_file_paths)
+    else:
+        batch_size = len(data_strings)
 
     combined_data = data_strings[0].splitlines()
     combined_data[8] = combined_data[8][:-1]
@@ -85,22 +90,21 @@ def combine_data_files(data_file_paths, file_name=None):
         target_string = data_string.splitlines()[8][:-1]
         combined_data.insert(9+i, str(2+i) + target_string[1:])
     combined_data[9+i] += ";"
-    combined_data.insert(2, "param BatchSize:={} ;".format(len(data_file_paths)))
+    combined_data.insert(2, "param BatchSize:={} ;".format(batch_size))
     combined_data = "\n".join(combined_data)
 
-    file_name = "data_batch.txt" if file_name is None else file_name
-    combined_file_path = os.path.join(os.path.split(data_file_paths[0])[0], file_name)
-    with open(combined_file_path, "w+") as data_file:
-        data_file.write(combined_data)
-    return combined_file_path
+    if store:
+        file_name = "data_batch.txt" if file_name is None else file_name
+        combined_file_path = os.path.join(os.path.split(data_file_paths[0])[0], file_name)
+        with open(combined_file_path, "w+") as data_file:
+            data_file.write(combined_data)
+    return combined_data
 
 
-def generate_job(model_file_path, data_file_path, 
-                 command_string, to_file=False, job_file_path=None):
+def generate_job(model_file_path, data_string, command_string, 
+                 to_file=False, job_file_path=None):
     with open(model_file_path) as model_file:
         model_string = model_file.read()
-    with open(data_file_path) as data_file:
-        data_string = data_file.read()
     job_string = """<document>
         <category>minco</category>
         <solver>BARON</solver>
@@ -215,18 +219,21 @@ def parse_output(job_output_string, batched_data=False):
             "total_time": total_time, "ampl_time": ampl_time}
 
 
-def run_neos_job(model_file_path, data_file_paths, display_variable_data=False, 
-                 baron_options=None, log_output=False, batched_data=False):
+def run_neos_job(model_file_path, data_file_paths=None, data_strings=None, 
+                 display_variable_data=False, baron_options=None, 
+                 log_output=False, batched_data=False):
     if isinstance(data_file_paths, list):
         batched_data = True
-        data_file_path = combine_data_files(data_file_paths)
+        data_string = combine_data_files(data_file_paths=data_file_paths)
+    elif data_file_paths is not None:
+        data_string = open(data_file_paths).read()
     else:
-        data_file_path = data_file_paths
+        data_string = combine_data_files(data_strings=data_strings, store=False)
     if display_variable_data:
         commands = generate_commands("target", baron_options, batched_data)
     else:
         commands = generate_commands(None, baron_options, batched_data)
-    job_string = generate_job(model_file_path, data_file_path, commands)
+    job_string = generate_job(model_file_path, data_string, commands)
     output = process_job(job_string, log_output=log_output)
     if output is not None:
         output_data = parse_output(output, batched_data)

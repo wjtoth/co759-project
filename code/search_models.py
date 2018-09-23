@@ -89,7 +89,8 @@ class Step(nn.Module):
 class ToyNet(nn.Module):
 
     def __init__(self, nonlin=nn.ReLU, input_shape=(784,), hidden_units=100,
-                 num_classes=10, separate_activations=True, multi_gpu_modules=False):
+                 num_classes=10, biases=True, separate_activations=True, 
+                 multi_gpu_modules=False):
         super().__init__()
         self.input_size = input_shape[0]
         self.fc1_size = hidden_units
@@ -98,7 +99,7 @@ class ToyNet(nn.Module):
         self.input_sizes = [list(input_shape), [self.fc1_size]]
 
         block1 = OrderedDict([
-            ("fc1", nn.Linear(self.input_size, self.fc1_size)), 
+            ("fc1", nn.Linear(self.input_size, self.fc1_size, bias=biases)), 
             ("nonlin1", nonlin()),
         ])
         block2 = OrderedDict([

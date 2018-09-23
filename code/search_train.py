@@ -44,6 +44,9 @@ def get_args():
                         choices=("relu", "step01", "step11", "staircase"))
     parser.add_argument("--hidden-units", type=int, default=100,
                         help="number of hidden units in the toy network")
+    parser.add_argument("--no-biases", action="store_true", default=False,
+                        help="if specified, the network does not contain any biases"
+                             "---only applies to the toy network.")
 
     # training/optimization arguments
     parser.add_argument("--no-train", action="store_true", default=False)
@@ -240,7 +243,8 @@ def main(args):
                 "MNIST, or graph connectivity task.")
         network = ToyNet(nonlin=nonlin, input_shape=input_shape, 
             hidden_units=args.hidden_units, num_classes=num_classes, 
-            separate_activations=args.comb_opt, multi_gpu_modules=args.multi_gpu)
+            biases=not args.no_biases, separate_activations=args.comb_opt, 
+            multi_gpu_modules=args.multi_gpu)
     network.needs_backward_twice = False
     if args.nonlin.startswith("step") or args.nonlin == "staircase":
         network.targetprop_rule = args.grad_tp_rule
@@ -493,7 +497,8 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                 if args.ampl_train and step < args.ampl_train_steps:
                     data_strings = []
                     for i in range(args.batch):
-                        data_string = parse_step_data(model, targets[i], i, step)
+                        data_string = parse_step_data(
+                            model, targets[i], i, step, store_data=False)
                         data_strings.append(data_string)
                     optimal_target_data = compute_optimal_targets(
                         step, data_strings=data_strings, 
@@ -814,24 +819,27 @@ def parse_step_data(model, label, target_index, train_step, log_dir=None,
 def compute_optimal_targets(train_step, data_dir=None, data_strings=None, 
                             model_file_path="toy_model_batch.tex", 
                             target_index=None, baron_options=None):
-    if target_index is not None:
-        data_file_path = os.path.join(
-            data_dir, "data" + str(target_index) + "_step" + str(train_step))
-        data_file_paths = data_file_path
+    if data_strings is None:
+        if target_index is not None:
+            data_file_path = os.path.join(
+                data_dir, "data" + str(target_index) + "_step" + str(train_step))
+            data_file_paths = data_file_path
+        else:
+            data_file_names = utils.file_findall(
+                data_dir, r"data\d+_step" + str(train_step) + r"\.txt")
+            data_file_paths = [os.path.join(data_dir, file_name) 
+                               for file_name in data_file_names]
+        if not data_file_paths:
+            print("\nNo AMPL data found for step", train_step)
+            return
     else:
-        data_file_names = utils.file_findall(
-            data_dir, r"data\d+_step" + str(train_step) + r"\.txt")
-        data_file_paths = [os.path.join(data_dir, file_name) 
-                           for file_name in data_file_names]
-    if not data_file_paths:
-        print("\nNo AMPL data found for step", train_step)
-    else:
-        optimal_target_data = run_neos_job(
-            model_file_path, data_file_paths, display_variable_data=True, 
-            baron_options=baron_options)
-        if optimal_target_data is not None:
-            optimal_target_data["step"] = train_step
-        return optimal_target_data
+        data_file_paths = None
+    optimal_target_data = run_neos_job(
+        model_file_path, data_file_paths, data_strings, 
+        display_variable_data=True, baron_options=baron_options)
+    if optimal_target_data is not None:
+        optimal_target_data["step"] = train_step
+    return optimal_target_data
 
 
 def store_target_data(target_data, data_dir):
