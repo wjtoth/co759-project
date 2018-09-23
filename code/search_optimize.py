@@ -162,7 +162,7 @@ def generate_neighborhood(base_tensor, size, radius, sampling_weights=None,
     Returns:
         A total of 'size' randomly-generated neighbors of base_tensor. 
     """
-    batch_base = torch.stack([base_tensor]*size)
+    batch_base = torch.cat([base_tensor.unsqueeze(0)]*size)
     sampling_prob = radius / base_tensor.numel()
     if perturb_base_tensor is None:
         one_tensor = torch.ones(batch_base.shape)
@@ -170,11 +170,11 @@ def generate_neighborhood(base_tensor, size, radius, sampling_weights=None,
             one_tensor = one_tensor.cuda()
     else:
         one_tensor = perturb_base_tensor
-    indices = torch.bernoulli(one_tensor*sampling_prob)
-    if sampling_weights is not None:
-        batch_weights = torch.stack([sampling_weights]*size)
-        sampling_mask = indices.float() * batch_weights
-        indices = torch.bernoulli(sampling_mask)  
+    if sampling_weights is None:
+        indices = torch.bernoulli(one_tensor*sampling_prob)
+    else:
+        batch_weights = torch.cat([sampling_weights.unsqueeze(0)]*size)
+        indices = torch.bernoulli(sampling_prob*one_tensor*batch_weights)
     neighbourhood = batch_base * (indices*-2 + 1)
     return neighbourhood
 
@@ -355,12 +355,13 @@ class SearchOptimizer(TargetPropOptimizer):
             modules = self.modules[module_index]
             activations = None
         if criterion_weight is not None:
-            criterion_weight = torch.stack([criterion_weight]*(self.candidates 
+            criterion_weight = torch.cat(
+                [criterion_weight.unsqueeze(0)]*(self.candidates 
                 + (len(base_candidates) if base_candidates is not None else 1))) 
         if module_index > 0 and self.criterion != "output_loss":
             module_target = module_target.float()
             loss_function = partial(soft_hinge_loss, reduce_=False)
-        target_batch = torch.stack([module_target]*(self.candidates 
+        target_batch = torch.cat([module_target.unsqueeze(0)]*(self.candidates 
             + (len(base_candidates) if base_candidates is not None else 1)))
         splice_conv_targets = (self.splice_conv_targets 
             and any([isinstance(layer, Conv2d) for layer in self.modules[module_index]])
@@ -472,7 +473,7 @@ class SearchOptimizer(TargetPropOptimizer):
                     raise NotImplementedError("Loss grad eval metric can currently "
                                               "only be used with beam size == 1.")
                 grad_norm = torch.abs(loss_grad)
-                loss_factors = torch.stack([losses]*self.regions, dim=1) 
+                loss_factors = torch.cat([losses.unsqueeze(1)]*self.regions, dim=1) 
                 loss_factors = loss_factors / torch.min(loss_factors)
                 grad_norm = grad_norm * loss_factors  # accounts for loss differences
                 top_grad_norm, top_region_indices = torch.min(
@@ -480,13 +481,6 @@ class SearchOptimizer(TargetPropOptimizer):
                 best_candidates = splice(candidates, top_region_indices)
                 targets.append((best_candidates.squeeze(0), None))
             else:
-                if losses.dim() > 1:
-                    mean_losses = losses.view(losses.shape[0], int(np.prod(losses.shape[1:])))
-                    mean_losses = mean_losses.mean(dim=1)
-                else:
-                    mean_losses = losses
-                top_losses, candidate_indices = torch.topk(
-                    mean_losses, beam_size, dim=0, largest=False, sorted=True)
                 if splice_conv_targets:
                     candidate_regions, loss_regions, field_info = inverse_receptive_fields(
                         candidates, losses, self.regions, 
@@ -494,13 +488,16 @@ class SearchOptimizer(TargetPropOptimizer):
                                   "padding": module[0].padding[0]}, 
                          "max_pool": {"kernel_size": module[1].kernel_size}}, "medium")
                     loss_regions = loss_regions.mean(2)
-                    loss_regions = torch.stack(
-                        [loss_regions]*candidate_regions.shape[2], dim=2)
+                    loss_regions = torch.cat(
+                        [loss_regions.unsqueeze(2)]*candidate_regions.shape[2], dim=2)
                     top_loss_regions, region_indices = torch.topk(
                         loss_regions, beam_size, dim=0, largest=False, sorted=True)
                     best_regions = torch.gather(candidate_regions, 0, region_indices)
                     best_candidates = splice_conv(best_regions, field_info["input"])
+                    top_losses = None
                 else:
+                    top_losses, candidate_indices = torch.topk(
+                        losses, beam_size, dim=0, largest=False, sorted=True)
                     best_candidates = candidates[candidate_indices]
                 if self.perturb_type == "grad_guided":
                     top_loss_grads = loss_tuple[1][candidate_indices]
@@ -528,7 +525,7 @@ class RandomGradOptimizer(TargetPropOptimizer):
         if module_index > 0:
             module_target = module_target.float()
             loss_function = partial(soft_hinge_loss, reduce_=False)
-        target_batch = torch.stack([module_target]*self.candidates)
+        target_batch = torch.cat([module_target.unsqueeze(0)]*self.candidates)
 
         parents = [get_random_tensor(self.shapes[module_index], use_gpu=self.use_gpu)
                    for i in range(self.candidates)] 
