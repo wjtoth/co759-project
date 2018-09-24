@@ -163,7 +163,7 @@ def process_job(job_string, server="https://neos-server.org:3333",
                 status = neos.getJobStatus(job_number, password)
                 time.sleep(1)
                 timer += 1
-                if timer > 300:
+                if timer > 500:
                     print("\nNEOS BARON job exceeded time limit:", timer, "seconds")
                     print("Ending...")
                     return

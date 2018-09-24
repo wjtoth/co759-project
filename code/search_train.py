@@ -326,7 +326,9 @@ def main(args):
         ampl_data_dir = args.ampl_eval_dir or os.path.join(log_dir, "run_data")
         for time_step in args.collect_timesteps:
             optimal_target_data = compute_optimal_targets(
-                time_step, data_dir=ampl_data_dir, baron_options=args.baron_options)
+                time_step, data_dir=ampl_data_dir, baron_options=args.baron_options, 
+                model_file_path=("toy_model_batch_nobias.tex" 
+                    if args.no_biases else "toy_model_batch.tex"))
             if optimal_target_data is not None:
                 optimal_target_data = store_target_data(
                     optimal_target_data, ampl_data_dir)
@@ -494,15 +496,18 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                     loss *= torch.abs(loss_grad)
                 loss = loss.sum()
             if j != len(modules)-1:
-                if args.ampl_train and step < args.ampl_train_steps:
+                if args.ampl_train and 10 <= step < args.ampl_train_steps:
                     data_strings = []
                     for i in range(args.batch):
                         data_string = parse_step_data(
-                            model, targets[i], i, step, store_data=False)
+                            model, targets[i], i, step, 
+                            store_data=False, biases=not args.no_biases)
                         data_strings.append(data_string)
                     optimal_target_data = compute_optimal_targets(
                         step, data_strings=data_strings, 
-                        baron_options=args.baron_options)
+                        baron_options=args.baron_options, 
+                        model_file_path=("toy_model_batch_nobias.tex" 
+                            if args.no_biases else "toy_model_batch.tex"))
                     targets = torch.stack(optimal_target_data["targets"])
                 else:
                     activation = model.all_activations[len(modules)-1-j-1](
@@ -528,7 +533,8 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
         target_loss = loss_function(modules[0][0](targets.float()), output_targets)
         for i in range(args.collect_count):
             parse_step_data(model, output_targets[i], i, step, 
-                            os.path.join(log_dir, "run_data"), target_loss[i].item())
+                            os.path.join(log_dir, "run_data"), 
+                            target_loss[i].item(), biases=not args.no_biases)
     if not train_per_layer:
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -771,17 +777,18 @@ def correct_format(row_string, index=None):
 
 
 def parse_step_data(model, label, target_index, train_step, log_dir=None, 
-                    target_loss=None, store_data=True, layer=2):
+                    target_loss=None, store_data=True, layer=2, biases=True):
     if log_dir is not None and not os.path.exists(log_dir):
         os.mkdir(log_dir)
     torch.set_printoptions(threshold=1000000, linewidth=1000000)
     parameters = list(model.parameters())
-    weight_matrix = parameters[2*(layer-1)].transpose(0, 1)
-    bias_vector = parameters[2*(layer-1)+1]
+    weight_matrix = parameters[2*(layer-1) if biases else layer-1].transpose(0, 1)
     weight_rows = re.findall(r"\[.*?\]", str(weight_matrix))
-    bias_rows = re.findall(r"\[.*?\]", str(bias_vector))
     weight_rows = [correct_format(row, index=i+1) for i, row in enumerate(weight_rows)]
-    bias_rows = [correct_format(row, index=i+1) for i, row in enumerate(bias_rows)]
+    if biases:
+        bias_vector = parameters[2*(layer-1)+1]
+        bias_rows = re.findall(r"\[.*?\]", str(bias_vector))
+        bias_rows = [correct_format(row, index=i+1) for i, row in enumerate(bias_rows)]
     torch.set_printoptions(profile="default")
 
     if label.numel() == 1:
@@ -792,14 +799,16 @@ def parse_step_data(model, label, target_index, train_step, log_dir=None,
     label_rows = [correct_format(row, index=i+1) for i, row in enumerate(label_rows)]
 
     weight_string = "\n".join(weight_rows)
-    bias_string = "\n".join(bias_rows)
+    if biases:
+        bias_string = "\n".join(bias_rows)
     label_string = "\n".join(label_rows)
 
     data_string = "data ;\n\nparam M:=100 ;\nparam N:=10 ;\n\n\n"
     data_string += "param T:\n\t" + "\t".join(str(i) for i in range(1, 11)) + " :=\n"
     data_string += label_string + " ;\n\n\n"
-    data_string += "param B:\n\t" + "\t".join(str(i) for i in range(1, 11)) + " :=\n"
-    data_string += bias_string + " ;\n\n\n"
+    if biases:
+        data_string += "param B:\n\t" + "\t".join(str(i) for i in range(1, 11)) + " :=\n"
+        data_string += bias_string + " ;\n\n\n"
     data_string += "param W:\n\t\t" + "\t\t".join(str(i) for i in range(1, 11)) + " :=\n"
     data_string += weight_string + "  ;"
 
@@ -836,7 +845,8 @@ def compute_optimal_targets(train_step, data_dir=None, data_strings=None,
         data_file_paths = None
     optimal_target_data = run_neos_job(
         model_file_path, data_file_paths, data_strings, 
-        display_variable_data=True, baron_options=baron_options)
+        display_variable_data=True, baron_options=baron_options, 
+        batched_data=True)
     if optimal_target_data is not None:
         optimal_target_data["step"] = train_step
     return optimal_target_data
