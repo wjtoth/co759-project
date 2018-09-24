@@ -425,7 +425,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
             with torch.no_grad():
                 evaluate(model, eval_dataset_loader, loss_function, 
                          eval_metrics, logger, 0, log=True, use_gpu=use_gpu)
-        last_time = time()
+        last_time, last_step = time(), 0
         model.train()
         for i, batch in enumerate(train_dataset_loader):
             inputs, labels = batch[0], batch[1]
@@ -442,10 +442,10 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     except RuntimeError:
                         inputs = inputs.view(batch_size, 3072)
             step = epoch*len(train_dataset_loader) + i
-            if i % 10 == 1 or (args.ampl_train and 10 <= step < args.ampl_train_steps):
-                last_time = eval_step(model, inputs, labels, loss_function, 
-                                      training_metrics, logger, epoch, 
-                                      i, step, last_time)
+            if i % 10 == 1 or (args.ampl_train and 10 <= step < args.ampl_train_steps+10):
+                last_step, last_time = eval_step(model, inputs, labels, loss_function, 
+                                                 training_metrics, logger, epoch, 
+                                                 i, step, last_time, last_step)
             train_step(model, modules, inputs, labels, loss_function, optimizer, 
                        target_optimizer, args, step, train_per_layer, log_dir)
         if eval_dataset_loader is not None:
@@ -496,7 +496,7 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                     loss *= torch.abs(loss_grad)
                 loss = loss.sum()
             if j != len(modules)-1:
-                if args.ampl_train and 10 <= step < args.ampl_train_steps:
+                if args.ampl_train and 10 <= step < args.ampl_train_steps+10:
                     data_strings = []
                     for i in range(args.batch):
                         data_string = parse_step_data(
@@ -588,7 +588,7 @@ def train_step_grad(model, modules, inputs, targets, loss_function, optimizer,
 
 
 def eval_step(model, inputs, labels, loss_function, training_metrics, 
-              logger, epoch, batch, step, last_step_time):
+              logger, epoch, batch, step, last_step_time, last_step):
     model.eval()
     outputs = model(inputs)
     loss = loss_function(outputs, labels).mean().item()
@@ -597,12 +597,8 @@ def eval_step(model, inputs, labels, loss_function, training_metrics,
         batch_accuracy_top5 = 0
     else:
         batch_accuracy_top5 = accuracy_topk(outputs, labels, k=5).item()
-    if batch == 1:
-        steps = 1
-    else:
-        steps = 10
     current_time = time()
-    steps_per_sec = steps/(current_time-last_step_time)
+    steps_per_sec = (step - last_step)/(current_time-last_step_time)
     metric_tuple = (("loss", loss), ("accuracy", batch_accuracy), 
                     ("accuracy_top5", batch_accuracy_top5), 
                     ("steps/sec", steps_per_sec))
@@ -617,7 +613,7 @@ def eval_step(model, inputs, labels, loss_function, training_metrics,
         logger.scalar_summary("train/top5_accuracy", batch_accuracy_top5, step)
     last_step_time = current_time
     model.train()
-    return last_step_time
+    return step, last_step_time
 
 
 def evaluate(model, dataset_loader, loss_function, 
