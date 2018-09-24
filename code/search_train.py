@@ -442,7 +442,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                     except RuntimeError:
                         inputs = inputs.view(batch_size, 3072)
             step = epoch*len(train_dataset_loader) + i
-            if i % 10 == 1:
+            if i % 10 == 1 or (args.ampl_train and 10 <= step < args.ampl_train_steps):
                 last_time = eval_step(model, inputs, labels, loss_function, 
                                       training_metrics, logger, epoch, 
                                       i, step, last_time)
@@ -508,7 +508,7 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                         baron_options=args.baron_options, 
                         model_file_path=("toy_model_batch_nobias.tex" 
                             if args.no_biases else "toy_model_batch.tex"))
-                    targets = torch.stack(optimal_target_data["targets"])
+                    targets = torch.stack(optimal_target_data["targets"]).cuda()
                 else:
                     activation = model.all_activations[len(modules)-1-j-1](
                         preactivations[j+1].detach())

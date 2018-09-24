@@ -187,16 +187,21 @@ def parse_output(job_output_string, batched_data=False):
         for instance_output in instances:
             loss = float(re.search(r"Objective (\d.\d+)", instance_output)[1])
             losses.append(loss)
-        output = instances[-1]
+        output = instances[-1].split("Objective")[1]
         if ":=" in output:
-            batch_size = len(re.findall(r"\d", output.splitlines()[3]))
-            output = output.split(":=")[1]
-            target_values = re.findall(r"[ \t\r\f\v](\d)", output)
+            upper_indices = re.findall(r"(\d+)\s*:=", output)
+            lower_indices = re.findall(r":\s*(\d+)", output)
+            chunk_sizes = [int(i) - int(j) + 1 for i, j in zip(upper_indices, lower_indices)]
+            output_chunks = output.split(":=")[1:]
             targets = []
-            for i in range(batch_size):
-                target = [int(value) for j, value in enumerate(target_values) 
-                          if j % batch_size == i]
-                targets.append(torch.tensor(target))
+            for i, output in enumerate(output_chunks):
+                if i == len(output_chunks)-1:
+                    output = output.split(";")[0]
+                target_values = re.findall(r"[ \t\r\f\v]([01])", output)
+                for j in range(chunk_sizes[i]):
+                    target = [int(value) for k, value in enumerate(target_values) 
+                              if k % chunk_sizes[i] == j]
+                    targets.append(2*torch.tensor(target)-1)
         else:
             targets = None
     else:
