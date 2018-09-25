@@ -230,10 +230,12 @@ def main(args):
     print("Creating network...")
     if args.model == "convnet4":
         network = ConvNet4(nonlin=nonlin, input_shape=input_shape, 
+                           num_classes=num_classes,
                            separate_activations=args.comb_opt, 
                            multi_gpu_modules=args.multi_gpu)
     elif args.model == "convnet8":
         network = ConvNet8(nonlin=nonlin, input_shape=input_shape, 
+                           num_classes=num_classes,
                            separate_activations=args.comb_opt, 
                            multi_gpu_modules=args.multi_gpu)
     elif args.model == "toynet":
@@ -508,6 +510,15 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                         baron_options=args.baron_options, 
                         model_file_path=("toy_model_batch_nobias.tex" 
                             if args.no_biases else "toy_model_batch.tex"))
+                    valid_lengths = [args.hidden_units, args.hidden_units+1]
+                    if all([target.shape[0] in valid_lengths 
+                            for target in optimal_target_data["targets"]]):
+                        optimal_target_data["targets"] = [
+                            target.resize_(args.hidden_units) 
+                            for target in optimal_target_data["targets"]]
+                    else:
+                        print([target.shape for target 
+                               in optimal_target_data["targets"]])
                     targets = torch.stack(optimal_target_data["targets"]).cuda()
                 else:
                     activation = model.all_activations[len(modules)-1-j-1](
@@ -737,8 +748,9 @@ def load_checkpoint(log_dir, epoch=None, best_eval=False):
     checkpoint_files = [file_name for file_name in os.listdir(log_dir)
                         if file_name.startswith("checkpoint")]
     if epoch is None and best_eval:
-        checkpoint_states = [torch.load(os.path.join(log_dir, file_name)) 
-                             for file_name in checkpoint_files]
+        checkpoint_states = [
+            torch.load(os.path.join(log_dir, file_name), map_location="cpu") 
+            for file_name in checkpoint_files]
         best_index, best_accuracy = 0, 0
         for i, state in enumerate(checkpoint_states):
             eval_accuracy = state["eval_metrics"][-1]["accuracy"]
@@ -752,7 +764,8 @@ def load_checkpoint(log_dir, epoch=None, best_eval=False):
         checkpoint_files = [file_name for file_name in checkpoint_files
                             if "epoch{}".format(epoch) in file_name]
 
-    checkpoint_state = torch.load(os.path.join(log_dir, checkpoint_files[-1]))
+    checkpoint_state = torch.load(
+        os.path.join(log_dir, checkpoint_files[-1]), map_location="cpu")
     return checkpoint_state
 
 
