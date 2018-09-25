@@ -34,7 +34,7 @@ def create_datasets(ds_name, batch_size, test_batch_size, do_aug, no_val_set, da
         # mean_std = ((0.49139968, 0.48215841, 0.44653091), (0.24703223, 0.24348513, 0.26158784))
         mean_std = ((129.30416561 / 255, 124.0699627 / 255, 112.43405006 / 255),
                     (68.1702429 / 255, 65.39180804 / 255, 70.41837019 / 255))
-        ds = datasets.CIFAR10
+        ds = datasets.CIFAR100
         create_ds_func = partial(create_mnist_cifar_datasets, ds=ds, download=allow_download, val_pct=0.2,
                                  data_dir='data/' + ds_name)
         num_classes = 100
