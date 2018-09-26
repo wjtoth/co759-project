@@ -51,7 +51,8 @@ def get_args():
     # training/optimization arguments
     parser.add_argument("--no-train", action="store_true", default=False)
     parser.add_argument("--test", action="store_true", default=False)
-    parser.add_argument("--load-checkpoint", type=str, default=None)
+    parser.add_argument("--eval", action="store_true", default=False)
+    parser.add_argument("--load-checkpoints", type=str, nargs="+", default=None)
     parser.add_argument("--load-checkpoint-best", action="store_true", default=False)
     parser.add_argument("--batch", type=int, default=64,
                         help="batch size to use for training")
@@ -229,13 +230,13 @@ def main(args):
 
     print("Creating network...")
     if args.model == "convnet4":
-        network = ConvNet4(nonlin=nonlin, input_shape=input_shape, 
-                           num_classes=num_classes,
+        network = ConvNet4(nonlin=nonlin, input_shape=input_shape,
+                           num_classes=num_classes, 
                            separate_activations=args.comb_opt, 
                            multi_gpu_modules=args.multi_gpu)
     elif args.model == "convnet8":
-        network = ConvNet8(nonlin=nonlin, input_shape=input_shape, 
-                           num_classes=num_classes,
+        network = ConvNet8(nonlin=nonlin, input_shape=input_shape,
+                           num_classes=num_classes, 
                            separate_activations=args.comb_opt, 
                            multi_gpu_modules=args.multi_gpu)
     elif args.model == "toynet":
@@ -245,8 +246,8 @@ def main(args):
                 "MNIST, or graph connectivity task.")
         network = ToyNet(nonlin=nonlin, input_shape=input_shape, 
             hidden_units=args.hidden_units, num_classes=num_classes, 
-            biases=not args.no_biases, separate_activations=args.comb_opt, 
-            multi_gpu_modules=args.multi_gpu)
+            biases=not args.no_biases, multi_gpu_modules=args.multi_gpu,
+            separate_activations=args.comb_opt or args.collect_params)
     network.needs_backward_twice = False
     if args.nonlin.startswith("step") or args.nonlin == "staircase":
         network.targetprop_rule = args.grad_tp_rule
@@ -263,6 +264,11 @@ def main(args):
         str(round(time())) if not args.load_checkpoint else args.load_checkpoint)
     tb_logger = TensorBoardLogger(log_dir) if args.tb_logging else None
 
+    print("Creating loss function...")
+    criterion = torch.nn.CrossEntropyLoss(
+        size_average=not args.comb_opt and not args.collect_params, 
+        reduce=not args.comb_opt and not args.collect_params)
+
     if args.load_checkpoint is not None:
         print("Loading from checkpoint", args.load_checkpoint + "...")
         checkpoint_state = load_checkpoint(
@@ -272,9 +278,6 @@ def main(args):
         model_state = checkpoint_state["model_state"]
         network.load_state_dict(model_state)
     if not args.no_train:
-        print("Creating loss function...")
-        criterion = torch.nn.CrossEntropyLoss(
-            size_average=not args.comb_opt, reduce=not args.comb_opt)
         print("Creating parameter optimizer...")
         optimizer = partial(optim.Adam, lr=0.00025, weight_decay=args.wtdecay)
         if args.comb_opt:
@@ -313,6 +316,14 @@ def main(args):
                 print("\nTraining interrupted!\n")
             else:
                 print("\nFinished training.\n")
+
+    if args.eval:
+        print("Evaluating model...")
+        eval_metrics = Metrics({"dataset_batches": len(val_loader), 
+                                "loss": [], "accuracy": [], "accuracy_top5": []})
+        with torch.no_grad():
+            evaluate(network, val_loader, criterion, eval_metrics, 
+                     tb_logger, last_step, log=True, use_gpu=args.cuda)
 
     if args.test:
         print("Testing model...")
@@ -388,24 +399,24 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
           log_dir=None, logger=None, use_gpu=True, args=None):
     model.train()
     batch_size = train_dataset_loader.batch_size
-    train_per_layer = target_optimizer is not None
+    train_per_layer = target_optimizer is not None or args.collect_params
     if train_per_layer:
         optimizers = [optimizer(module.parameters()) for module in model.all_modules]
+        modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
         lr_schedulers = [optim.lr_scheduler.MultiStepLR(optimizer, 
                             args.lr_decay_epochs, gamma=args.lr_decay_factor)
                          for optimizer in optimizers]
-        modules = list(zip(model.all_modules, optimizers))[::-1]  # in reverse order
+    else:
+        optimizer = optimizer(model.parameters())
+        lr_schedulers = [optim.lr_scheduler.MultiStepLR(
+            optimizer, args.lr_decay_epochs, gamma=args.lr_decay_factor)]
+    if target_optimizer is not None:
         target_optimizer = target_optimizer(
             modules=list(model.all_modules)[::-1],
             shapes=model.input_sizes[::-1],
             activations=list(model.all_activations[::-1]),
             loss_functions=[loss_function]*len(model.all_modules),
             use_gpu=use_gpu)
-    else:
-        modules = None
-        optimizer = optimizer(model.parameters())
-        lr_schedulers = [optim.lr_scheduler.MultiStepLR(
-            optimizer, args.lr_decay_epochs, gamma=args.lr_decay_factor)]
     print("Optimizers created.")
     extra_args = target_optimizer.__dict__.copy() if args.comb_opt else None
     if extra_args is not None and "perturb_base_tensors" in extra_args:
@@ -448,8 +459,12 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                 last_step, last_time = eval_step(model, inputs, labels, loss_function, 
                                                  training_metrics, logger, epoch, 
                                                  i, step, last_time, last_step)
-            train_step(model, modules, inputs, labels, loss_function, optimizer, 
-                       target_optimizer, args, step, train_per_layer, log_dir)
+            if args.collect_params and target_optimizer is None:
+                train_step_grad(model, modules, inputs, labels, loss_function, optimizer, 
+                                target_optimizer, args, step, train_per_layer, log_dir)
+            else:
+                train_step(model, modules, inputs, labels, loss_function, optimizer, 
+                           target_optimizer, args, step, train_per_layer, log_dir)
         if eval_dataset_loader is not None:
             with torch.no_grad():
                 evaluate(model, eval_dataset_loader, loss_function, 
@@ -505,7 +520,7 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                             model, targets[i], i, step, 
                             store_data=False, biases=not args.no_biases)
                         data_strings.append(data_string)
-                    optimal_target_data = compute_optimal_targets(
+                    optimal_target_data, output = compute_optimal_targets(
                         step, data_strings=data_strings, 
                         baron_options=args.baron_options, 
                         model_file_path=("toy_model_batch_nobias.tex" 
@@ -519,7 +534,11 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                     else:
                         print([target.shape for target 
                                in optimal_target_data["targets"]])
-                    targets = torch.stack(optimal_target_data["targets"]).cuda()
+                    try:
+                        targets = torch.stack(optimal_target_data["targets"]).cuda()
+                    except:
+                        print("\n", output, "\n")
+                        raise
                 else:
                     activation = model.all_activations[len(modules)-1-j-1](
                         preactivations[j+1].detach())
@@ -559,43 +578,48 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
 
 def train_step_grad(model, modules, inputs, targets, loss_function, optimizer, 
                     target_optimizer, args, step, train_per_layer, log_dir):
-    if train_per_layer:
-        # Obtain activations / hidden states
-        preactivations = []
-        postactivations = []
-        for j, (module, _) in enumerate(modules[::-1]):
-            if j == 0:
-                outputs = module(inputs)
-            else:
-                outputs = module(activation)
-            preactivations.append(outputs)
-            if j != len(modules)-1:
-                activation = model.all_activations[j](outputs).detach()
-                activation.requires_grad_()
-                postactivations.append(activation)
-        preactivations.reverse()
-        postactivations.reverse()
-        # Then target prop in reverse mode
-        loss_grad = 1
-        for j, (module, optimizer) in enumerate(modules):
-            optimizer.zero_grad()
-            outputs = preactivations[j]
-            if j == 0:
-                loss = loss_function(outputs, targets.detach()).mean()
-            else:
-                #loss = torch.tanh(outputs) * loss_grad
-                loss = soft_hinge_loss(
-                    outputs, targets.detach().float(), reduce_=False)
-                loss *= torch.abs(loss_grad)
-                loss = loss.sum()
-            optimizer.zero_grad()
-            loss.backward()
-            if j != len(modules)-1:
-                loss_grad = postactivations[j].grad
-                targets = -torch.sign(loss_grad)
-            optimizer.step()
-    else:
-        raise RuntimeError("Change the training step function!")
+    output_targets = targets
+    # Obtain activations / hidden states
+    preactivations = []
+    postactivations = []
+    for j, (module, _) in enumerate(modules[::-1]):
+        if j == 0:
+            outputs = module(inputs)
+        else:
+            outputs = module(activation)
+        preactivations.append(outputs)
+        if j != len(modules)-1:
+            activation = model.all_activations[j](outputs).detach()
+            activation.requires_grad_()
+            postactivations.append(activation)
+    preactivations.reverse()
+    postactivations.reverse()
+    # Then target prop in reverse mode
+    loss_grad = 1
+    for j, (module, optimizer) in enumerate(modules):
+        optimizer.zero_grad()
+        outputs = preactivations[j]
+        if j == 0:
+            loss = loss_function(outputs, targets.detach()).mean()
+        else:
+            #loss = torch.tanh(outputs) * loss_grad
+            loss = soft_hinge_loss(
+                outputs, targets.detach().float(), reduce_=False)
+            loss *= torch.abs(loss_grad)
+            loss = loss.sum()
+        optimizer.zero_grad()
+        loss.backward()
+        if j != len(modules)-1:
+            loss_grad = postactivations[j].grad
+            targets = -torch.sign(loss_grad)
+        optimizer.step()
+    
+    if args.collect_params and step in args.collect_timesteps and args.model == "toynet":
+        target_loss = loss_function(modules[0][0](targets.float()), output_targets)
+        for i in range(args.collect_count):
+            parse_step_data(model, output_targets[i], i, step, 
+                            os.path.join(log_dir, "run_data"), 
+                            target_loss[i].item(), biases=not args.no_biases)
 
 
 def eval_step(model, inputs, labels, loss_function, training_metrics, 
@@ -757,7 +781,7 @@ def load_checkpoint(log_dir, epoch=None, best_eval=False):
             if eval_accuracy > best_accuracy:
                 best_accuracy = eval_accuracy
                 best_index = i
-        checkpoint_files = [checkpoint_files[i]]
+        checkpoint_files = [checkpoint_files[best_index]]
     elif epoch is None:
         checkpoint_files.sort(key=lambda string: int(string[16:-6]))
     else:
@@ -852,13 +876,13 @@ def compute_optimal_targets(train_step, data_dir=None, data_strings=None,
             return
     else:
         data_file_paths = None
-    optimal_target_data = run_neos_job(
+    optimal_target_data, output = run_neos_job(
         model_file_path, data_file_paths, data_strings, 
         display_variable_data=True, baron_options=baron_options, 
         batched_data=True)
     if optimal_target_data is not None:
         optimal_target_data["step"] = train_step
-    return optimal_target_data
+    return optimal_target_data, output
 
 
 def store_target_data(target_data, data_dir):
@@ -879,12 +903,18 @@ if __name__ == "__main__":
             multiprocessing.set_start_method("spawn")
     except RuntimeError:
         pass
-    if args.runs == 1:
-        main(args)
+    if args.load_checkpoints is not None:
+            checkpoints = args.load_checkpoints
     else:
-        for i in range(args.runs):
-            print("\nStarting experiment " + str(i+1) + "...\n")
-            # Run in separate process to avoid PyTorch multiprocessing errors
-            process = Process(target=main, args=(args,))
-            process.start()
-            process.join()
+        checkpoints = [None]
+    for checkpoint in checkpoints:
+        args.load_checkpoint = checkpoint
+        if args.runs == 1:
+            main(args)
+        else:
+            for i in range(args.runs):
+                print("\nStarting experiment " + str(i+1) + "...\n")
+                # Run in separate process to avoid PyTorch multiprocessing errors
+                process = Process(target=main, args=(args,))
+                process.start()
+                process.join()

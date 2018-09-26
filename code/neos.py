@@ -185,8 +185,12 @@ def parse_output(job_output_string, batched_data=False):
         instances = job_output_string.split("BARON")[1:]
         losses = []
         for instance_output in instances:
-            loss = float(re.search(r"Objective (\d.\d+)", instance_output)[1])
-            losses.append(loss)
+            data = re.search(r"Objective (\d.\d+)", instance_output)
+            if data is not None:
+                loss = float(data[1])
+                losses.append(loss)
+        if batched_data and len(losses) < 64:
+            raise ValueError("Expected 64 loss values, only found:", len(losses))
         output = instances[-1].split("Objective")[1]
         if ":=" in output:
             upper_indices = re.findall(r"(\d+)\s*:=", output)
@@ -239,12 +243,16 @@ def run_neos_job(model_file_path, data_file_paths=None, data_strings=None,
     else:
         commands = generate_commands(None, baron_options, batched_data)
     job_string = generate_job(model_file_path, data_string, commands)
-    output = process_job(job_string, log_output=log_output)
-    if output is not None:
-        output_data = parse_output(output, batched_data)
-    else:
-        output_data = None
-    return output_data
+    try:
+        output = process_job(job_string, log_output=log_output)
+        if output is not None:
+            output_data = parse_output(output, batched_data)
+        else:
+            output_data = None
+    except:
+        print("\n", output, "\n")
+        raise
+    return output_data, output
 
 
 if __name__ == '__main__':
