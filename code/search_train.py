@@ -338,7 +338,7 @@ def main(args):
         print("Computing optimal targets at selected timesteps...")
         ampl_data_dir = args.ampl_eval_dir or os.path.join(log_dir, "run_data")
         for time_step in args.collect_timesteps:
-            optimal_target_data = compute_optimal_targets(
+            optimal_target_data, output = compute_optimal_targets(
                 time_step, data_dir=ampl_data_dir, baron_options=args.baron_options, 
                 model_file_path=("toy_model_batch_nobias.tex" 
                     if args.no_biases else "toy_model_batch.tex"))
