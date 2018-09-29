@@ -61,7 +61,7 @@ def generate_commands(displayed_variable="target", baron_options=None, batched_d
                 command_string += keyword + "=" + str(value) + " "
             else:
                 command_string += keyword + " "
-        command_string = command_string.rstrip() + "';"
+        command_string = command_string + "';"
     if batched_data:
         command_string += "\nfor {e in ELEMENTS}{\nlet E := e;\nsolve;\n}"
     else:
@@ -69,6 +69,7 @@ def generate_commands(displayed_variable="target", baron_options=None, batched_d
     if displayed_variable:
         command_string += "\ndisplay {}".format(displayed_variable) + ";"
     command_string += "\ndisplay _total_solve_time, _ampl_time;"
+    print(command_string)
     return command_string 
 
 
