@@ -6,6 +6,8 @@ import json
 from functools import partial
 from itertools import chain
 from time import time
+from pprint import pprint
+from copy import deepcopy
 
 # pytorch / numpy
 import numpy as np
@@ -44,6 +46,7 @@ def get_args():
                         choices=("relu", "step01", "step11", "staircase"))
     parser.add_argument("--hidden-units", type=int, default=100,
                         help="number of hidden units in the toy network")
+    parser.add_argument("--hidden-units-set", type=int, nargs="+", default=None)
     parser.add_argument("--no-biases", action="store_true", default=False,
                         help="if specified, the network does not contain any biases"
                              "---only applies to the toy network.")
@@ -79,6 +82,7 @@ def get_args():
     parser.add_argument("--ampl-train-steps", type=int, default=625)
     parser.add_argument("--ampl-eval", action="store_true", default=False)
     parser.add_argument("--ampl-eval-dir", type=str, default=None)
+    parser.add_argument("--target-setting-eval", action="store_true", default=False)
     parser.add_argument("--baron-options", type=str, default=None)
 
     # target propagation arguments
@@ -179,21 +183,7 @@ def get_args():
     return args
 
 
-def main(args):
-    # Get datasets
-    if args.dataset == "graphs":
-        train_loader, val_loader, test_loader = get_graphs(
-            6, batch_size=args.batch, num_workers=args.nworkers, 
-            val_set=not args.no_val)
-        num_classes = 2
-    else:
-        train_loader, val_loader, test_loader, num_classes = \
-            create_datasets(args.dataset, args.batch, args.test_batch, not args.no_aug, 
-                            args.no_val, args.data_root, args.cuda, args.seed, 
-                            args.nworkers, args.dbg_ds_size, args.download)
-    if args.adv_eval:
-        adversarial_eval_dataset = get_adversarial_dataset(args)
-
+def create_network(args):
     # Create activation function
     args.nonlin = args.nonlin.lower()
     if args.nonlin == "relu":
@@ -231,12 +221,12 @@ def main(args):
     print("Creating network...")
     if args.model == "convnet4":
         network = ConvNet4(nonlin=nonlin, input_shape=input_shape,
-                           num_classes=num_classes, 
+                           num_classes=args.num_classes, 
                            separate_activations=args.comb_opt, 
                            multi_gpu_modules=args.multi_gpu)
     elif args.model == "convnet8":
         network = ConvNet8(nonlin=nonlin, input_shape=input_shape,
-                           num_classes=num_classes, 
+                           num_classes=args.num_classes, 
                            separate_activations=args.comb_opt, 
                            multi_gpu_modules=args.multi_gpu)
     elif args.model == "toynet":
@@ -245,7 +235,7 @@ def main(args):
                 "Toy network can only be trained on CIFAR10, "
                 "MNIST, or graph connectivity task.")
         network = ToyNet(nonlin=nonlin, input_shape=input_shape, 
-            hidden_units=args.hidden_units, num_classes=num_classes, 
+            hidden_units=args.hidden_units, num_classes=args.num_classes, 
             biases=not args.no_biases, multi_gpu_modules=args.multi_gpu,
             separate_activations=args.comb_opt or args.collect_params)
     network.needs_backward_twice = False
@@ -259,6 +249,27 @@ def main(args):
     if args.multi_gpu and not args.comb_opt:
         network = nn.DataParallel(network)
 
+    return network
+
+
+def main(args):
+    # Get datasets
+    if args.dataset == "graphs":
+        train_loader, val_loader, test_loader = get_graphs(
+            6, batch_size=args.batch, num_workers=args.nworkers, 
+            val_set=not args.no_val)
+        num_classes = 2
+    else:
+        train_loader, val_loader, test_loader, num_classes = \
+            create_datasets(args.dataset, args.batch, args.test_batch, not args.no_aug, 
+                            args.no_val, args.data_root, args.cuda, args.seed, 
+                            args.nworkers, args.dbg_ds_size, args.download)
+    if args.adv_eval:
+        adversarial_eval_dataset = get_adversarial_dataset(args)
+
+    args.num_classes = num_classes
+    network = create_network(args)
+
     print("Setting up logging...")
     log_dir = os.path.join(os.path.join(os.curdir, "logs"), 
         str(round(time())) if not args.load_checkpoint else args.load_checkpoint)
@@ -268,6 +279,8 @@ def main(args):
     criterion = torch.nn.CrossEntropyLoss(
         size_average=not args.comb_opt and not args.collect_params, 
         reduce=not args.comb_opt and not args.collect_params)
+    print("Creating parameter optimizer...")
+    optimizer = partial(optim.Adam, lr=0.00025, weight_decay=args.wtdecay)
 
     if args.load_checkpoint is not None:
         print("Loading from checkpoint", args.load_checkpoint + "...")
@@ -278,8 +291,6 @@ def main(args):
         model_state = checkpoint_state["model_state"]
         network.load_state_dict(model_state)
     if not args.no_train:
-        print("Creating parameter optimizer...")
-        optimizer = partial(optim.Adam, lr=0.00025, weight_decay=args.wtdecay)
         if args.comb_opt:
             print("Creating target optimizer...")
             if args.nonlin != "step11":
@@ -341,17 +352,41 @@ def main(args):
             optimal_target_data, output = compute_optimal_targets(
                 time_step, data_dir=ampl_data_dir, baron_options=args.baron_options, 
                 model_file_path=("toy_model_batch_nobias.tex" 
-                    if args.no_biases else "toy_model_batch.tex"))
+                    if args.no_biases else "toy_model_batch.tex"))   
             if optimal_target_data is not None:
+                step_state = load_step_state(time_step, ampl_data_dir)
+                network.load_state_dict(step_state["model"])
+                loss_mean, loss_std_error = eval_step_thin_last(
+                    network, criterion, 
+                    2*torch.stack(optimal_target_data["targets"]).cuda()-1, 
+                    step_state["targets"].cuda(), custom_loss=True)
+                optimal_target_data["true_loss_mean"] = loss_mean
+                optimal_target_data["true_loss_std_error"] = loss_std_error
                 optimal_target_data = store_target_data(
                     optimal_target_data, ampl_data_dir)
-                print("\nStep", time_step, "optimal target loss mean:", 
+                print("\nStep", time_step, "optimal target ampl loss mean:", 
                       optimal_target_data["loss_mean"])
-                print("Step", time_step, "optimal target loss standard error:", 
+                print("Step", time_step, "optimal target ampl loss standard error:", 
                       optimal_target_data["loss_std_error"])
+                print("Step", time_step, "optimal target loss mean:", 
+                      optimal_target_data["true_loss_mean"])
+                print("Step", time_step, "optimal target loss standard error:", 
+                      optimal_target_data["true_loss_std_error"])
                 print("Step", time_step, "total time and ampl time:",
                       optimal_target_data["total_time"], 
                       optimal_target_data["ampl_time"])
+
+    if args.target_setting_eval:
+        print("Running randomized target setting evaluation...")
+        target_optimizer = create_target_optimizer(network, criterion, args)
+        network_generator = partial(create_network, args)
+        search_generator = partial(generate_search_targets, target_optimizer)
+        ftprop_generator = generate_grad_targets
+        loss_data = baron_random_eval(
+            network_generator, search_generator, ftprop_generator, 
+            eval_step_thin_last, criterion, optimizer, "./logs", 
+            not args.no_biases, dataset_size=2, include_baron=True)
+        print("Loss data:", loss_data)
 
     if args.adv_eval:
         print("\nEvaluating on adversarial examples...")
@@ -407,6 +442,7 @@ def train(model, train_dataset_loader, eval_dataset_loader, loss_function,
                             args.lr_decay_epochs, gamma=args.lr_decay_factor)
                          for optimizer in optimizers]
     else:
+        modules = None
         optimizer = optimizer(model.parameters())
         lr_schedulers = [optim.lr_scheduler.MultiStepLR(
             optimizer, args.lr_decay_epochs, gamma=args.lr_decay_factor)]
@@ -482,6 +518,10 @@ def perturb_scheduler(train_step, module_index, iteration, perturb_sizes=[1000])
 
 def train_step(model, modules, inputs, targets, loss_function, optimizer, 
                target_optimizer, args, step, train_per_layer, log_dir):
+    # Make clone of model for BARON eval
+    if args.collect_params and step in args.collect_timesteps and args.model == "toynet":
+        prior_model, prior_modules = deepcopy(model), deepcopy(modules)
+
     output_targets = targets
     if train_per_layer:
         # Obtain activations / hidden states
@@ -525,19 +565,12 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                         baron_options=args.baron_options, 
                         model_file_path=("toy_model_batch_nobias.tex" 
                             if args.no_biases else "toy_model_batch.tex"))
-                    valid_lengths = [args.hidden_units, args.hidden_units+1]
-                    if all([target.shape[0] in valid_lengths 
-                            for target in optimal_target_data["targets"]]):
-                        optimal_target_data["targets"] = [
-                            target.resize_(args.hidden_units) 
-                            for target in optimal_target_data["targets"]]
-                    else:
-                        print([target.shape for target 
-                               in optimal_target_data["targets"]])
                     try:
-                        targets = torch.stack(optimal_target_data["targets"]).cuda()
+                        targets = 2*torch.stack(optimal_target_data["targets"]).cuda()-1
                     except:
                         print("\n", output, "\n")
+                        print([target.shape for target 
+                               in optimal_target_data["targets"]])
                         raise
                 else:
                     activation = model.all_activations[len(modules)-1-j-1](
@@ -560,11 +593,13 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
             optimizer.step()
             
     if args.collect_params and step in args.collect_timesteps and args.model == "toynet":
-        target_loss = loss_function(modules[0][0](targets.float()), output_targets)
+        target_loss = loss_function(prior_modules[0][0](targets.float()), output_targets)
         for i in range(args.collect_count):
-            parse_step_data(model, output_targets[i], i, step, 
+            parse_step_data(prior_model, output_targets[i], i, step, 
                             os.path.join(log_dir, "run_data"), 
                             target_loss[i].item(), biases=not args.no_biases)
+            store_step_state(prior_model, output_targets, step,
+                             os.path.join(log_dir, "run_data"))
     if not train_per_layer:
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -578,6 +613,10 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
 
 def train_step_grad(model, modules, inputs, targets, loss_function, optimizer, 
                     target_optimizer, args, step, train_per_layer, log_dir):
+    # Make clone of model for BARON eval
+    if args.collect_params and step in args.collect_timesteps and args.model == "toynet":
+        prior_model, prior_modules = deepcopy(model), deepcopy(modules)
+    
     output_targets = targets
     # Obtain activations / hidden states
     preactivations = []
@@ -615,11 +654,28 @@ def train_step_grad(model, modules, inputs, targets, loss_function, optimizer,
         optimizer.step()
     
     if args.collect_params and step in args.collect_timesteps and args.model == "toynet":
-        target_loss = loss_function(modules[0][0](targets.float()), output_targets)
+        target_loss = loss_function(prior_modules[0][0](targets.float()), output_targets)
         for i in range(args.collect_count):
-            parse_step_data(model, output_targets[i], i, step, 
+            parse_step_data(prior_model, output_targets[i], i, step, 
                             os.path.join(log_dir, "run_data"), 
                             target_loss[i].item(), biases=not args.no_biases)
+            store_step_state(prior_model, output_targets, step,
+                             os.path.join(log_dir, "run_data"))
+
+
+def eval_step_thin_last(models, loss_function, inputs, targets, custom_loss=False):
+    if not isinstance(models, list):
+        models = [models]
+    modules = [model.all_modules[1] for model in models]
+    loss_track = []
+    for module in modules:
+        if custom_loss:
+            losses = -1*(torch.sum(targets*module(inputs.float()), 1) 
+                         - torch.log(torch.sum(torch.exp(module(inputs.float())), 1)))
+        else:
+            losses = loss_function(module(inputs.float()), targets)
+        loss_track.append(float(losses.mean()))
+    return np.mean(loss_track), np.std(loss_track) / np.sqrt(len(loss_track))
 
 
 def eval_step(model, inputs, labels, loss_function, training_metrics, 
@@ -793,6 +849,23 @@ def load_checkpoint(log_dir, epoch=None, best_eval=False):
     return checkpoint_state
 
 
+def store_step_state(model, targets, step, log_dir):
+    if not os.path.exists(log_dir):
+        os.mkdir(log_dir)
+    file_path = os.path.join(log_dir, "model_state_step" + str(step) + ".data")
+    try:
+        torch.save({"step": step, "model": model.state_dict(), 
+                    "targets": targets}, file_path)
+    except:
+        torch.save({"step": step, "model": model.state_dict(), 
+                    "targets": targets}, file_path)
+
+
+def load_step_state(step, log_dir):
+    file_path = os.path.join(log_dir, "model_state_step" + str(step) + ".data")
+    return torch.load(file_path, map_location="cpu")
+
+
 def correct_format(row_string, index=None):
     # Remove delimiters and correct spacing
     corrected_string = row_string.replace("[", "").replace("]", "").strip()
@@ -809,10 +882,11 @@ def correct_format(row_string, index=None):
     return corrected_string
 
 
-def parse_step_data(model, label, target_index, train_step, log_dir=None, 
+def parse_step_data(model, label, target_index=None, train_step=None, log_dir=None, 
                     target_loss=None, store_data=True, layer=2, biases=True):
     if log_dir is not None and not os.path.exists(log_dir):
         os.mkdir(log_dir)
+    torch.set_printoptions(precision=3)
     torch.set_printoptions(threshold=1000000, linewidth=1000000)
     parameters = list(model.parameters())
     weight_matrix = parameters[2*(layer-1) if biases else layer-1].transpose(0, 1)
@@ -858,7 +932,7 @@ def parse_step_data(model, label, target_index, train_step, log_dir=None,
     return data_string
 
 
-def compute_optimal_targets(train_step, data_dir=None, data_strings=None, 
+def compute_optimal_targets(train_step=None, data_dir=None, data_strings=None, 
                             model_file_path="toy_model_batch.tex", 
                             target_index=None, baron_options=None):
     if data_strings is None:
@@ -880,7 +954,7 @@ def compute_optimal_targets(train_step, data_dir=None, data_strings=None,
         model_file_path, data_file_paths, data_strings, 
         display_variable_data=True, baron_options=baron_options, 
         batched_data=True)
-    if optimal_target_data is not None:
+    if optimal_target_data is not None and train_step is not None:
         optimal_target_data["step"] = train_step
     return optimal_target_data, output
 
@@ -896,6 +970,116 @@ def store_target_data(target_data, data_dir):
     return target_data
 
 
+def process_optimal_target_data(checkpoint, output_file="./logs/baron_eval_data.txt"):
+    data_dir = os.path.join(os.path.join(os.path.join(
+        os.curdir, "logs"), str(checkpoint)), "run_data")
+    if not os.path.exists(data_dir):
+        raise RuntimeError("BARON data for checkpoint", checkpoint, "not found!")
+    # Get BARON data
+    baron_output_files = [file_name for file_name in os.listdir(data_dir) 
+                          if file_name.startswith("ampl_output_step")]
+    optimal_target_data = []
+    for file_name in baron_output_files:
+        target_data = torch.load(os.path.join(data_dir, file_name))
+        optimal_target_data.append({"step": target_data["step"],
+                                    "loss_mean": target_data["loss_mean"], 
+                                    "loss_std_error": target_data["loss_std_error"],
+                                    "total_time": target_data["total_time"]})
+    # Get and process training target data
+    heuristic_target_data = []
+    for step_data in optimal_target_data:
+        step = step_data["step"]
+        target_loss_files = [file_name for file_name in os.listdir(data_dir)
+                             if file_name.startswith("loss") 
+                             and file_name.endswith("step" + str(step) + ".txt")]
+        losses = []
+        for file_name in target_loss_files:
+            with open(os.path.join(data_dir, file_name), "r") as loss_file:
+                losses.append(float(loss_file.read().strip()))
+        loss_mean = np.mean(losses)
+        loss_std_error = np.std(losses) / np.sqrt(len(losses))
+        heuristic_target_data.append({"step": step, "loss_mean": loss_mean, 
+                                      "loss_std_error": loss_std_error})
+    # Save to disk
+    file_paths = [output_file, os.path.join(data_dir, "baron_eval_data.txt")]
+    for file_path in file_paths:
+        with open(file_path, "a+") as file:
+            print("\n\n", checkpoint, "optimal target data:", file=file)
+            pprint(optimal_target_data, stream=file)
+            print("\n", checkpoint, "heuristic target data:", file=file)
+            pprint(heuristic_target_data, stream=file)
+
+    return optimal_target_data, heuristic_target_data
+
+
+def create_target_optimizer(model, loss_function, args):
+    return SearchOptimizer( 
+        batch_size=args.batch, criterion=args.criterion, regions=3, 
+        perturb_scheduler=partial(perturb_scheduler, perturb_sizes=[1000]), 
+        candidates=args.candidates, iterations=args.iterations, 
+        searches=args.searches, search_type=args.search_type, 
+        perturb_type=args.perturb_type, candidate_type=args.candidate_type, 
+        candidate_grad_delay=args.candidate_grad_delay, 
+        splice_conv_targets=args.splice_conv_targets, 
+        grad_guide_offset=args.grad_guide_offset,
+        modules=list(model.all_modules)[::-1],
+        shapes=model.input_sizes[::-1],
+        activations=list(model.all_activations[::-1]),
+        loss_functions=[loss_function]*len(model.all_modules),
+        use_gpu=args.cuda)
+
+
+def generate_search_targets(target_optimizer, model, loss_function, targets):
+    targets, target_loss = target_optimizer.step(-1, 0, targets, 
+        base_targets=[[None, 1/1, partial(perturb_scheduler, perturb_sizes=[1000])]])
+    return targets
+
+
+def generate_grad_targets(model, loss_function, optimizer, targets):
+    random_input = torch.rand(1, 100).cuda()
+    random_input.requires_grad_()
+    loss = loss_function(model.all_modules[1](random_input), targets.detach()).mean()
+    optimizer.zero_grad()
+    loss.backward()
+    return -torch.sign(random_input.grad)
+
+
+def baron_random_eval(network_generator, search_generator, ftprop_generator, 
+                      eval_step_callable, loss_function, optimizer, 
+                      log_dir, biases, dataset_size=128, include_baron=True):
+    networks = [network_generator() for i in range(dataset_size)]
+    output_targets = torch.randint(0, 10, (dataset_size,)).long().cuda()
+    data_strings, search_targets, grad_targets = [], [], []
+    for i in range(dataset_size):
+        network_optimizer = optimizer(networks[i].parameters())
+        search_target = search_generator(networks[i], loss_function, 
+                                         output_targets[i].unsqueeze(0))
+        grad_target = ftprop_generator(networks[i], loss_function, network_optimizer,
+                                       output_targets[i].unsqueeze(0))
+        search_targets.append(search_target)
+        grad_targets.append(grad_target)
+        data_string = parse_step_data(
+            networks[i], output_targets[i], store_data=False, biases=biases)
+        data_strings.append(data_string)
+    if include_baron:
+        optimal_target_data, output = compute_optimal_targets(
+            data_strings=data_strings, 
+            model_file_path=("toy_model_batch.tex" 
+                             if biases else "toy_model_batch_nobias.tex"),
+            baron_options={"epsa": 1e-5})
+    target_set = {"grls": torch.cat(search_targets), "ftprop": torch.cat(grad_targets), 
+                  "baron": None if not include_baron 
+                        else 2*torch.stack(optimal_target_data["targets"]).cuda()-1}
+    loss_data = {}
+    for method, targets in target_set.items():
+        if targets is not None:
+            loss_mean, loss_std_error = eval_step_callable(
+                networks, loss_function, targets, output_targets)
+            loss_data[method] = {"loss_mean": loss_mean, 
+                                 "loss_std_error": loss_std_error}
+    return loss_data
+
+
 if __name__ == "__main__":
     args = get_args()
     try:
@@ -904,11 +1088,24 @@ if __name__ == "__main__":
     except RuntimeError:
         pass
     if args.load_checkpoints is not None:
-            checkpoints = args.load_checkpoints
+        checkpoints = args.load_checkpoints
     else:
-        checkpoints = [None]
-    for checkpoint in checkpoints:
+        checkpoints = None
+    if args.hidden_units_set is not None:
+        hidden_units_set = args.hidden_units_set
+    else:
+        hidden_units_set = None
+    if checkpoints is None and hidden_units_set is None:
+        group_args = [(None, None)]
+    elif checkpoints is None and hidden_units_set is not None:
+        group_args = [(None, units) for units in hidden_units_set]
+    elif checkpoints is not None and hidden_units_set is None:
+        group_args = [(checkpoint, None) for checkpoint in checkpoints]
+    else:
+        group_args = list(zip(checkpoints, hidden_units_set))
+    for checkpoint, hidden_units in group_args:
         args.load_checkpoint = checkpoint
+        args.hidden_units = hidden_units or args.hidden_units
         if args.runs == 1:
             main(args)
         else:
