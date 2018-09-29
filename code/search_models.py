@@ -103,7 +103,7 @@ class ToyNet(nn.Module):
             ("nonlin1", nonlin()),
         ])
         block2 = OrderedDict([
-            ("fc2", nn.Linear(self.fc1_size, num_classes)),
+            ("fc2", nn.Linear(self.fc1_size, num_classes, bias=biases)),
         ])
 
         if self.separate_activations:
