@@ -190,8 +190,6 @@ def parse_output(job_output_string, batched_data=False):
             if data is not None:
                 loss = float(data[1])
                 losses.append(loss)
-        if batched_data and len(losses) < 64:
-            raise ValueError("Expected 64 loss values, only found:", len(losses))
         output = instances[-1].split("Objective")[1]
         if ":=" in output:
             upper_indices = re.findall(r"(\d+)\s*:=", output)

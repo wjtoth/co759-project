@@ -385,7 +385,7 @@ def main(args):
         loss_data = baron_random_eval(
             network_generator, search_generator, ftprop_generator, 
             eval_step_thin_last, criterion, optimizer, "./logs", 
-            not args.no_biases, dataset_size=2, include_baron=True)
+            not args.no_biases, dataset_size=100, include_baron=True)
         print("Loss data:", loss_data)
 
     if args.adv_eval:
@@ -566,7 +566,7 @@ def train_step(model, modules, inputs, targets, loss_function, optimizer,
                         model_file_path=("toy_model_batch_nobias.tex" 
                             if args.no_biases else "toy_model_batch.tex"))
                     try:
-                        targets = 2*torch.stack(optimal_target_data["targets"]).cuda()-1
+                        targets = torch.stack(optimal_target_data["targets"]).cuda()
                     except:
                         print("\n", output, "\n")
                         print([target.shape for target 
@@ -910,7 +910,8 @@ def parse_step_data(model, label, target_index=None, train_step=None, log_dir=No
         bias_string = "\n".join(bias_rows)
     label_string = "\n".join(label_rows)
 
-    data_string = "data ;\n\nparam M:=100 ;\nparam N:=10 ;\n\n\n"
+    M, N = model.all_modules[0].fc1.out_features, model.all_modules[1].fc2.out_features
+    data_string = "data ;\n\nparam M:=%s ;\nparam N:=%s ;\n\n\n" % (M, N)
     data_string += "param T:\n\t" + "\t".join(str(i) for i in range(1, 11)) + " :=\n"
     data_string += label_string + " ;\n\n\n"
     if biases:
@@ -1036,7 +1037,7 @@ def generate_search_targets(target_optimizer, model, loss_function, targets):
 
 
 def generate_grad_targets(model, loss_function, optimizer, targets):
-    random_input = torch.rand(1, 100).cuda()
+    random_input = torch.rand(1, model.all_modules[0].fc1.out_features).cuda()
     random_input.requires_grad_()
     loss = loss_function(model.all_modules[1](random_input), targets.detach()).mean()
     optimizer.zero_grad()
@@ -1069,7 +1070,7 @@ def baron_random_eval(network_generator, search_generator, ftprop_generator,
             baron_options={"epsa": 1e-5})
     target_set = {"grls": torch.cat(search_targets), "ftprop": torch.cat(grad_targets), 
                   "baron": None if not include_baron 
-                        else 2*torch.stack(optimal_target_data["targets"]).cuda()-1}
+                        else torch.stack(optimal_target_data["targets"]).cuda()}
     loss_data = {}
     for method, targets in target_set.items():
         if targets is not None:
