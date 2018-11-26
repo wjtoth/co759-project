@@ -384,8 +384,8 @@ def main(args):
         ftprop_generator = generate_grad_targets
         loss_data = baron_random_eval(
             network_generator, search_generator, ftprop_generator, 
-            eval_step_thin_last, criterion, optimizer, "./logs", 
-            not args.no_biases, dataset_size=100, include_baron=True)
+            eval_step_thin_last, criterion, optimizer, "./logs", not args.no_biases, 
+            dataset_size=100, include_baron=True, cuda=args.cuda)
         print("Loss data:", loss_data)
 
     if args.adv_eval:
@@ -1046,10 +1046,12 @@ def generate_grad_targets(model, loss_function, optimizer, targets):
 
 
 def baron_random_eval(network_generator, search_generator, ftprop_generator, 
-                      eval_step_callable, loss_function, optimizer, 
-                      log_dir, biases, dataset_size=128, include_baron=True):
+                      eval_step_callable, loss_function, optimizer, log_dir, 
+                      biases, dataset_size=128, include_baron=True, cuda=True):
     networks = [network_generator() for i in range(dataset_size)]
-    output_targets = torch.randint(0, 10, (dataset_size,)).long().cuda()
+    output_targets = torch.randint(0, 10, (dataset_size,)).long()
+    if cuda:
+        output_targets = output_targets.cuda()
     data_strings, search_targets, grad_targets = [], [], []
     for i in range(dataset_size):
         network_optimizer = optimizer(networks[i].parameters())
@@ -1070,7 +1072,9 @@ def baron_random_eval(network_generator, search_generator, ftprop_generator,
             baron_options={"epsa": 1e-5})
     target_set = {"grls": torch.cat(search_targets), "ftprop": torch.cat(grad_targets), 
                   "baron": None if not include_baron 
-                        else torch.stack(optimal_target_data["targets"]).cuda()}
+                        else torch.stack(optimal_target_data["targets"])}
+    if include_baron and cuda:
+        target_set["baron"] = target_set["baron"].cuda()
     loss_data = {}
     for method, targets in target_set.items():
         if targets is not None:
